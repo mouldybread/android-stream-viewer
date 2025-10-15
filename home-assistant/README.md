@@ -3,7 +3,7 @@
 Home Assistant integration for Android Stream Viewer.
 
 <p align="center">
-  <img src="assets/ha.png" alt="Project Logo" />
+  <img src="ha.png" alt="Home Assistant Integration Example" />
 </p>
 
 
