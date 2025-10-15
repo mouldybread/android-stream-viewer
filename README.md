@@ -21,17 +21,16 @@ Turn your Android device into a network camera viewer with go2rtc integration an
 ## Features
 
 <p align="center">
-  <img src="screenshot.png" alt="Project Logo" width="256" />
+  <img src="screenshot.png" alt="Screenshot of GUI" />
 </p>
 
-- Automatically detects and indexs cameras from go2rtc
-- View multiple camera streams from go2rtc
+- Automatically indexes cameras from specified go2rtc server
 - WebRTC & MSE protocol support
-- Camera tour mode (cycle through cameras)
+- Camera tour mode (cycle through enabled cameras)
 - Burn-in protection (for displays)
 - Web configuration interface
-- Home Assistant integration
-- NEW: Dynamic camera list API
+- Home Assistant integration via APU
+- Dynamic camera list API endpoint
 
 ## API Endpoints
 
@@ -59,18 +58,6 @@ Turn your Android device into a network camera viewer with go2rtc integration an
 ## Home Assistant Integration
 
 See home-assistant/README.md for setup instructions.
-
-### Quick Start
-
-1. Add REST sensor (rest.yaml):
-
-- resource: http://<DEVICE_IP>:9090/api/camera-names
-  scan_interval: 60
-  sensor:
-    - name: "Stream Viewer Camera Names"
-      value_template: "{{ value }}"
-
-2. Camera dropdown automatically populates!
 
 ## Installation
 
