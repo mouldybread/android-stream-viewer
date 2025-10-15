@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="app/src/main/assets/logo.out.png" alt="Project Logo" width="256" />
+</p>
+
 # Android Stream Viewer
 
 Turn your Android device into a network camera viewer with go2rtc integration and a HTTP api for home assistant integration.
