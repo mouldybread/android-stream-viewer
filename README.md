@@ -20,6 +20,10 @@ Turn your Android device into a network camera viewer with go2rtc integration an
 
 ## Features
 
+<p align="center">
+  <img src="screenshot.png" alt="Project Logo" width="256" />
+</p>
+
 - Automatically detects and indexs cameras from go2rtc
 - View multiple camera streams from go2rtc
 - WebRTC & MSE protocol support
