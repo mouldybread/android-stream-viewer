@@ -2,6 +2,11 @@
 
 Home Assistant integration for Android Stream Viewer.
 
+<p align="center">
+  <img src="assets/ha.png" alt="Project Logo" />
+</p>
+
+
 ## Table of Contents
 - [Setup](#setup)
 - [Features](#features)
