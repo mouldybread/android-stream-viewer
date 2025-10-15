@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="app/src/main/assets/logo.out.png" alt="Project Logo" width="256" />
+  <img src="logo.png" alt="Project Logo" width="256" />
 </p>
 
 # Android Stream Viewer
