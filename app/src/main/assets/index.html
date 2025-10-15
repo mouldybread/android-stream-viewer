@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stream Viewer Control</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a1a; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; padding: 20px; color: #fff; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        h1 { text-align: center; margin-bottom: 10px; color: #007bff; font-size: 28px; }
+        .subtitle { text-align: center; color: #888; margin-bottom: 30px; font-size: 14px; }
+        .section { background: #2a2a2a; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.3); }
+        .section h2 { color: #007bff; margin-bottom: 15px; font-size: 18px; }
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; color: #fff; margin-bottom: 5px; font-size: 14px; font-weight: 500; }
+        .form-group input, .form-group select {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #444;
+            border-radius: 5px;
+            background: #1a1a1a;
+            color: #fff;
+            font-size: 14px;
+            transition: border-color 0.2s;
+        }
+        .form-group input:focus, .form-group select:focus { outline: none; border-color: #007bff; }
+        .form-group input::placeholder { color: #666; }
+        button {
+            padding: 10px 20px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            transition: background 0.2s;
+        }
+        button:hover { background: #0056b3; }
+        button:active { transform: scale(0.98); }
+        button.secondary { background: #6c757d; }
+        button.secondary:hover { background: #5a6268; }
+        button.danger { background: #dc3545; }
+        button.danger:hover { background: #c82333; }
+        button.success { background: #28a745; }
+        button.success:hover { background: #218838; }
+        button:disabled { background: #444; cursor: not-allowed; opacity: 0.6; }
+        button.small { padding: 5px 10px; font-size: 12px; }
+        .button-row { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+        .button-row button { flex: 1; min-width: 120px; }
+        .camera-list { list-style: none; }
+        .camera-item {
+            background: #1a1a1a;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 5px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            cursor: move;
+            border: 2px solid transparent;
+            transition: border-color 0.2s, transform 0.1s;
+        }
+        .camera-item:hover { border-color: #007bff; }
+        .camera-item.disabled { opacity: 0.5; }
+        .camera-item.dragging { opacity: 0.3; transform: scale(0.95); }
+        .camera-info { flex: 1; min-width: 0; }
+        .camera-info h3 { font-size: 16px; margin-bottom: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .camera-info p { font-size: 12px; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .camera-controls { display: flex; gap: 10px; align-items: center; flex-shrink: 0; }
+        .camera-actions { display: flex; gap: 5px; }
+        .camera-actions button { padding: 5px 10px; font-size: 12px; min-width: auto; }
+        .protocol-selector {
+            display: flex;
+            background: #111;
+            border-radius: 5px;
+            padding: 3px;
+            gap: 3px;
+        }
+        .protocol-selector button {
+            padding: 5px 12px;
+            font-size: 11px;
+            background: transparent;
+            color: #888;
+            border: 1px solid transparent;
+            min-width: auto;
+        }
+        .protocol-selector button:hover { background: #222; color: #fff; }
+        .protocol-selector button.active { background: #007bff; color: white; border-color: #007bff; }
+        .protocol-selector button:disabled { opacity: 0.3; cursor: not-allowed; }
+        #status {
+            text-align: center;
+            padding: 15px;
+            background: rgba(0, 123, 255, 0.1);
+            border-radius: 8px;
+            border: 2px solid #007bff;
+            font-weight: 500;
+        }
+        #status.error { background: rgba(220, 53, 69, 0.1); border-color: #dc3545; color: #dc3545; }
+        #status.success { background: rgba(40, 167, 69, 0.1); border-color: #28a745; color: #28a745; }
+        #logs {
+            display: none;
+            margin-top: 20px;
+            background: #000;
+            color: #0f0;
+            padding: 20px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 11px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            max-height: 400px;
+            overflow-y: auto;
+            border: 2px solid #0f0;
+            line-height: 1.4;
+            user-select: text;
+            -webkit-user-select: text;
+        }
+        #logs.visible { display: block; }
+        #logs.paused { border-color: #ff0; }
+        #logs::-webkit-scrollbar { width: 8px; }
+        #logs::-webkit-scrollbar-track { background: #000; }
+        #logs::-webkit-scrollbar-thumb { background: #0f0; border-radius: 4px; }
+        .log-controls { display: flex; gap: 5px; align-items: center; margin-top: 10px; }
+        .log-controls .status-indicator {
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-size: 11px;
+            background: #28a745;
+            color: white;
+        }
+        .log-controls .status-indicator.paused {
+            background: #ffc107;
+            color: #000;
+        }
+        .inline-row { display: flex; gap: 10px; align-items: end; }
+        .inline-row .form-group { flex: 1; margin-bottom: 0; }
+        .header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; flex-wrap: wrap; gap: 10px; }
+        .header-row h2 { margin: 0; }
+        .info-badge {
+            display: inline-block;
+            background: #007bff;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: bold;
+            margin-left: 10px;
+        }
+        .empty-state { text-align: center; color: #888; padding: 40px 20px; }
+        .empty-state-icon { font-size: 48px; margin-bottom: 10px; opacity: 0.5; }
+        input[type="checkbox"] { cursor: pointer; }
+        @media (max-width: 768px) {
+            body { padding: 10px; }
+            .button-row { flex-direction: column; }
+            .button-row button { width: 100%; }
+            .camera-item { flex-direction: column; align-items: flex-start; gap: 10px; }
+            .camera-controls { width: 100%; flex-direction: column; }
+            .camera-actions { width: 100%; justify-content: flex-end; }
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>📹 Stream Viewer Control</h1>
+    <p class="subtitle">Multi-camera management with tour mode</p>
+
+    <div class="section">
+        <h2>🔍 Discover Cameras</h2>
+        <div class="inline-row">
+            <div class="form-group">
+                <label for="server-url">go2rtc Server URL</label>
+                <input type="text" id="server-url" placeholder="http://192.168.1.100:1984" value="">
+            </div>
+            <button onclick="discoverCameras()">🔍 Discover</button>
+        </div>
+        <div id="discover-status" style="margin-top: 10px; color: #888; font-size: 13px;"></div>
+    </div>
+
+    <div class="section">
+        <div class="header-row">
+            <div>
+                <h2 style="display: inline;">📋 Camera List</h2>
+                <span class="info-badge" id="camera-count">0</span>
+            </div>
+            <button class="danger small" onclick="clearAllCameras()">🗑️ Clear All</button>
+        </div>
+        <ul id="camera-list" class="camera-list">
+            <li class="empty-state">
+                <div class="empty-state-icon">📹</div>
+                <div>No cameras configured</div>
+                <div style="font-size: 12px; margin-top: 10px;">Use "Discover Cameras" or "Add Camera" to get started</div>
+            </li>
+        </ul>
+        <div class="button-row">
+            <button onclick="showAddCamera()">➕ Add Camera</button>
+            <button class="success" onclick="startTour()">▶️ Start Tour</button>
+            <button class="danger" onclick="stopTour()">⏹️ Stop Tour</button>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>⏱️ Tour Settings</h2>
+        <div class="form-group">
+            <label for="tour-duration">Duration per camera (seconds)</label>
+            <input type="number" id="tour-duration" value="60" min="5" max="600" step="5">
+        </div>
+        <div style="color: #888; font-size: 12px; margin-top: 5px;">
+            💡 Recommended: 30-120 seconds for smooth transitions
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>🛡️ Burn-In Protection</h2>
+        <div class="form-group">
+            <label style="display: flex; align-items: center; cursor: pointer;">
+                <input type="checkbox" id="burn-in-toggle" onchange="toggleBurnInProtection()" style="margin-right: 10px; width: 20px; height: 20px;">
+                <span>Enable screen blanking (1 min every 2 hours)</span>
+            </label>
+        </div>
+        <div style="color: #888; font-size: 12px; margin-top: 10px;">
+            💡 Prevents LCD image retention by periodically resting the display. Automatically resumes after 1 minute.
+        </div>
+        <div id="burn-in-status" style="margin-top: 10px; color: #28a745; font-size: 13px;"></div>
+    </div>
+
+    <div class="section">
+        <h2>📋 Device Logs</h2>
+        <div class="button-row">
+            <button class="secondary" onclick="toggleLogs()">👁️ View Logs</button>
+            <button class="secondary" onclick="toggleLogPause()">⏸️ Pause Updates</button>
+            <button class="secondary" onclick="copyLogs()">📋 Copy Logs</button>
+            <button class="secondary" onclick="downloadLogs()">💾 Download</button>
+        </div>
+        <div class="log-controls" style="display: none;" id="log-controls">
+            <span class="status-indicator" id="log-status">● Live</span>
+            <span style="color: #888; font-size: 12px;">Select text to auto-pause</span>
+        </div>
+        <div id="logs">
+            <div id="logs-content">Loading logs...</div>
+        </div>
+    </div>
+
+    <div id="status">Ready - Waiting for commands</div>
+</div>
+
+<div id="add-camera-modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; padding: 20px; overflow-y: auto;">
+    <div style="max-width: 500px; margin: 50px auto; background: #2a2a2a; padding: 30px; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5);">
+        <h2 style="color: #007bff; margin-bottom: 20px;">➕ Add Camera</h2>
+        <div class="form-group">
+            <label>Camera Name</label>
+            <input type="text" id="new-camera-name" placeholder="Front Door" autocomplete="off">
+        </div>
+        <div class="form-group">
+            <label>Stream Name</label>
+            <input type="text" id="new-camera-stream" placeholder="camera1" autocomplete="off">
+        </div>
+        <div class="form-group">
+            <label>Protocol</label>
+            <select id="new-camera-protocol">
+                <option value="mse">MSE (Recommended)</option>
+                <option value="webrtc">WebRTC</option>
+            </select>
+        </div>
+        <div style="color: #888; font-size: 12px; margin: 10px 0 20px 0; padding: 10px; background: #1a1a1a; border-radius: 5px;">
+            💡 <strong>MSE</strong> is recommended for Fire TV devices. Use WebRTC only if needed.
+        </div>
+        <div class="button-row">
+            <button onclick="saveNewCamera()">💾 Save</button>
+            <button class="secondary" onclick="hideAddCamera()">✖️ Cancel</button>
+        </div>
+    </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

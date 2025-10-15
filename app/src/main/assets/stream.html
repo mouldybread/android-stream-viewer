@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #000; overflow: hidden; }
+        video { width: 100vw; height: 100vh; object-fit: cover; background: #000; }
+        #status {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px 15px;
+            border-radius: 5px;
+            font-size: 14px;
+            font-family: Arial, sans-serif;
+            z-index: 1000;
+        }
+    </style>
+</head>
+<body>
+<video id="player" autoplay playsinline muted preload="auto" webkit-playsinline></video>
+<div id="status">Connecting...</div>
+
+<script>
+    (function() {
+        try {
+            const video = document.getElementById('player');
+            const statusDiv = document.getElementById('status');
+            const streamUrl = '{{STREAM_URL}}';
+            const streamName = '{{STREAM_NAME}}';
+            const forceWebRTC = {{FORCE_WEBRTC}};
+            const forceMSE = {{FORCE_MSE}};
+
+            let websocket;
+            let pc;
+            let mediaSource;
+            let sourceBuffer;
+            let queue = [];
+            let mode = null;
+            let webrtcTimeout = null;
+            let reconnectTimeout = null;
+            let reconnectAttempts = 0;
+            let videoPlaying = false;
+            const maxReconnectAttempts = 5;
+
+            // FIX 4: Additional video element properties for Fire OS
+            video.controls = false;
+            video.defaultMuted = true;
+            video.muted = true;
+            video.volume = 0;
+
+            function updateStatus(msg) {
+                try {
+                    if (statusDiv) statusDiv.textContent = msg;
+                    console.log('[STATUS] ' + msg);
+                } catch (e) {
+                    console.error('Status error:', e);
+                }
+            }
+
+            function log(msg) {
+                console.log('[STREAM] ' + msg);
+            }
+
+            // FIX 2: Force H.264 Constrained Baseline Profile for Amazon compatibility
+            function forceH264Baseline(sdp) {
+                log('Applying H.264 Constrained Baseline filter to SDP');
+                let lines = sdp.split('\r\n');
+                let filteredLines = [];
+                let removedProfiles = 0;
+
+                for (let line of lines) {
+                    // Check for H.264 profile specifications
+                    if (line.includes('a=fmtp') && line.includes('profile-level-id')) {
+                        // 42e0 = Constrained Baseline (required by Amazon)
+                        // 4d40 = Main profile (not supported)
+                        // 6400 = High profile (not supported)
+                        if (line.includes('profile-level-id=42e0') || line.includes('profile-level-id=42E0')) {
+                            filteredLines.push(line);
+                            log('✓ Keeping H.264 Constrained Baseline: ' + line.substring(0, 60) + '...');
+                        } else {
+                            removedProfiles++;
+                            log('✗ Removing non-baseline profile: ' + line.substring(0, 60) + '...');
+                        }
+                    } else {
+                        filteredLines.push(line);
+                    }
+                }
+
+                log('SDP filter complete: removed ' + removedProfiles + ' non-baseline profiles');
+                return filteredLines.join('\r\n');
+            }
+
+            // FIX 5: Prevent Fire OS from pausing video when page is "hidden"
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden && video.paused && videoPlaying) {
+                    log('Page hidden - forcing video to continue playing');
+                    video.play().catch(e => log('Resume on visibility change failed: ' + e.message));
+                }
+            });
+
+            video.addEventListener('pause', () => {
+                if (videoPlaying && mode === 'webrtc') {
+                    log('Video paused unexpectedly - attempting to resume');
+                    setTimeout(() => {
+                        video.play().catch(e => log('Auto-resume failed: ' + e.message));
+                    }, 100);
+                }
+            });
+
+            function cleanup() {
+                try {
+                    if (webrtcTimeout) {
+                        clearTimeout(webrtcTimeout);
+                        webrtcTimeout = null;
+                    }
+
+                    if (reconnectTimeout) {
+                        clearTimeout(reconnectTimeout);
+                        reconnectTimeout = null;
+                    }
+
+                    if (pc) {
+                        pc.ontrack = null;
+                        pc.oniceconnectionstatechange = null;
+                        pc.onicecandidate = null;
+                        pc.close();
+                        pc = null;
+                    }
+
+                    if (sourceBuffer) {
+                        try {
+                            if (!sourceBuffer.updating) {
+                                sourceBuffer.abort();
+                            }
+                        } catch (e) {
+                            log('SourceBuffer cleanup error: ' + e.message);
+                        }
+                        sourceBuffer = null;
+                    }
+
+                    if (mediaSource && mediaSource.readyState === 'open') {
+                        try {
+                            mediaSource.endOfStream();
+                        } catch (e) {
+                            log('MediaSource cleanup error: ' + e.message);
+                        }
+                    }
+                    mediaSource = null;
+
+                    if (video.srcObject) {
+                        video.srcObject = null;
+                    }
+
+                    queue = [];
+                    mode = null;
+                } catch (e) {
+                    log('Cleanup error: ' + e.message);
+                }
+            }
+
+            async function startStream() {
+                try {
+                    cleanup();
+
+                    log('=== Starting Stream ===');
+                    log('Protocol: ' + (forceWebRTC ? 'WebRTC only' : forceMSE ? 'MSE only' : 'Auto'));
+                    log('Stream URL: ' + streamUrl);
+                    log('Stream Name: ' + streamName);
+                    log('User agent: ' + navigator.userAgent);
+                    updateStatus('Connecting...');
+
+                    websocket = new WebSocket(streamUrl);
+                    websocket.binaryType = 'arraybuffer';
+
+                    websocket.onopen = async () => {
+                        try {
+                            log('WebSocket connected');
+                            reconnectAttempts = 0;
+
+                            if (forceMSE) {
+                                log('Forcing MSE mode');
+                                fallbackToMSE();
+                                return;
+                            }
+
+                            updateStatus('Negotiating WebRTC...');
+
+                            // CRITICAL: No STUN servers for Fire TV compatibility
+                            pc = new RTCPeerConnection({
+                                iceServers: [],
+                                bundlePolicy: 'max-bundle',
+                                rtcpMuxPolicy: 'require',
+                                iceTransportPolicy: 'all'
+                            });
+
+                            log('RTCPeerConnection created (no STUN servers)');
+
+                            let trackCount = 0;
+                            pc.ontrack = (event) => {
+                                try {
+                                    trackCount++;
+                                    log('WebRTC track received: ' + event.track.kind + ' (track #' + trackCount + ')');
+                                    log('Track readyState: ' + event.track.readyState);
+                                    log('Stream ID: ' + event.streams[0].id);
+                                    log('Stream active: ' + event.streams[0].active);
+
+                                    if (trackCount === 1) {
+                                        mode = 'webrtc';
+                                        if (webrtcTimeout) {
+                                            clearTimeout(webrtcTimeout);
+                                            webrtcTimeout = null;
+                                        }
+
+                                        video.srcObject = event.streams[0];
+                                        log('Video srcObject set');
+                                        log('Video element readyState: ' + video.readyState);
+                                        log('Video networkState: ' + video.networkState);
+
+                                        // Add event listeners for debugging
+                                        video.addEventListener('loadstart', () => log('VIDEO EVENT: loadstart'));
+                                        video.addEventListener('loadedmetadata', () => log('VIDEO EVENT: loadedmetadata - duration: ' + video.duration));
+                                        video.addEventListener('loadeddata', () => log('VIDEO EVENT: loadeddata'));
+                                        video.addEventListener('canplay', () => log('VIDEO EVENT: canplay'));
+                                        video.addEventListener('canplaythrough', () => log('VIDEO EVENT: canplaythrough'));
+                                        video.addEventListener('playing', () => log('VIDEO EVENT: playing'));
+                                        video.addEventListener('waiting', () => log('VIDEO EVENT: waiting'));
+                                        video.addEventListener('stalled', () => log('VIDEO EVENT: stalled'));
+                                        video.addEventListener('suspend', () => log('VIDEO EVENT: suspend'));
+                                        video.addEventListener('error', (e) => {
+                                            log('VIDEO ERROR EVENT: ' + (e.message || 'unknown'));
+                                            if (video.error) {
+                                                log('Video error code: ' + video.error.code);
+                                                log('Video error message: ' + video.error.message);
+                                            }
+                                        });
+
+                                        setTimeout(() => {
+                                            if (video.srcObject) {
+                                                log('Attempting to play... readyState=' + video.readyState + ' networkState=' + video.networkState);
+
+                                                video.play().then(() => {
+                                                    log('✓✓✓ Playing via WebRTC SUCCESS ✓✓✓');
+                                                    updateStatus('Playing: ' + streamName);
+                                                    videoPlaying = true;
+
+                                                    setTimeout(() => {
+                                                        if (statusDiv && videoPlaying) {
+                                                            statusDiv.style.display = 'none';
+                                                        }
+                                                    }, 3000);
+                                                }).catch(e => {
+                                                    log('✗✗✗ Play error: ' + e.message);
+                                                    log('Error name: ' + e.name);
+                                                    log('Error toString: ' + e.toString());
+                                                    log('Video paused: ' + video.paused);
+                                                    log('Video readyState: ' + video.readyState);
+                                                    log('Video networkState: ' + video.networkState);
+                                                    updateStatus('Play error: ' + e.message);
+
+                                                    // Try forcing play again
+                                                    setTimeout(() => {
+                                                        log('Retry attempt...');
+                                                        video.play().catch(e2 => log('Retry failed: ' + e2.message));
+                                                    }, 1000);
+                                                });
+                                            } else {
+                                                log('✗✗✗ ERROR: srcObject is null!');
+                                                updateStatus('Error: No video source');
+                                            }
+                                        }, 100);
+                                    }
+                                } catch (e) {
+                                    log('✗✗✗ ontrack error: ' + e.message);
+                                    log('Stack: ' + (e.stack || 'no stack'));
+                                }
+                            };
+
+                            pc.oniceconnectionstatechange = () => {
+                                try {
+                                    const state = pc.iceConnectionState;
+                                    log('ICE Connection State: ' + state);
+
+                                    if (state === 'connected') {
+                                        log('ICE connected successfully');
+                                    } else if (state === 'failed') {
+                                        log('ICE FAILED - triggering fallback');
+                                        if (!mode && !forceWebRTC) {
+                                            fallbackToMSE();
+                                        }
+                                    } else if (state === 'disconnected') {
+                                        log('ICE disconnected');
+                                        if (!forceWebRTC && mode === 'webrtc') {
+                                            setTimeout(() => {
+                                                if (pc && pc.iceConnectionState === 'disconnected') {
+                                                    log('Still disconnected, trying MSE');
+                                                    fallbackToMSE();
+                                                }
+                                            }, 3000);
+                                        }
+                                    }
+                                } catch (e) {
+                                    log('ICE state change error: ' + e.message);
+                                }
+                            };
+
+                            // FIX 1: DISABLE TRICKLE ICE for Amazon Fire OS compatibility
+                            // Amazon devices don't support Trickle ICE - must send complete offer with all candidates
+                            pc.onicecandidate = (event) => {
+                                if (event.candidate) {
+                                    log('ICE candidate discovered: ' + event.candidate.candidate.substring(0, 50) + '...');
+                                    // DO NOT SEND YET - wait for gathering to complete
+                                } else {
+                                    log('✓ ICE gathering complete - sending full offer with all candidates');
+                                    // NOW send the complete offer with all embedded candidates
+                                    if (websocket && websocket.readyState === WebSocket.OPEN) {
+                                        websocket.send(JSON.stringify({
+                                            type: 'webrtc/offer',
+                                            value: pc.localDescription.sdp
+                                        }));
+                                        log('Complete WebRTC offer sent (non-trickle mode)');
+                                    } else {
+                                        log('✗ WebSocket not ready to send offer');
+                                    }
+                                }
+                            };
+
+                            pc.addTransceiver('video', { direction: 'recvonly' });
+                            pc.addTransceiver('audio', { direction: 'recvonly' });
+                            log('Transceivers added');
+
+                            const offer = await pc.createOffer();
+                            log('Offer created, applying H.264 baseline filter...');
+
+                            // FIX 2: Force H.264 Constrained Baseline
+                            offer.sdp = forceH264Baseline(offer.sdp);
+
+                            await pc.setLocalDescription(offer);
+                            log('Local description set, waiting for ICE gathering...');
+
+                            // FIX 1: DON'T send offer here - wait for onicecandidate(null)
+                            // The offer will be sent when ICE gathering completes
+
+                            if (!forceWebRTC) {
+                                webrtcTimeout = setTimeout(() => {
+                                    if (!mode) {
+                                        log('WebRTC timeout (10s), trying MSE');
+                                        fallbackToMSE();
+                                    }
+                                }, 10000); // Increased from 5s to 10s for slower ICE gathering
+                            }
+                        } catch (e) {
+                            log('WebRTC setup error: ' + e.message);
+                            updateStatus('Setup error');
+                            if (!forceWebRTC) {
+                                fallbackToMSE();
+                            }
+                        }
+                    };
+
+                    websocket.onmessage = async (event) => {
+                        try {
+                            if (typeof event.data === 'string') {
+                                const msg = JSON.parse(event.data);
+
+                                if (msg.type === 'webrtc/answer' && pc) {
+                                    log('WebRTC answer received');
+                                    if (webrtcTimeout) {
+                                        clearTimeout(webrtcTimeout);
+                                        webrtcTimeout = null;
+                                    }
+                                    await pc.setRemoteDescription({
+                                        type: 'answer',
+                                        sdp: msg.value
+                                    });
+                                    log('Remote description set');
+
+                                } else if (msg.type === 'webrtc/candidate' && pc) {
+                                    // FIX 1: Server is sending Trickle ICE candidates, but we ignore them
+                                    // Our offer already contains all candidates (non-trickle mode)
+                                    log('Ignoring trickle ICE candidate from server (using embedded candidates)');
+
+                                } else if (msg.type === 'mse') {
+                                    log('MSE codec received: ' + msg.value);
+                                    mode = 'mse';
+                                    updateStatus('Loading MSE...');
+
+                                    if (mediaSource && MediaSource.isTypeSupported(msg.value)) {
+                                        sourceBuffer = mediaSource.addSourceBuffer(msg.value);
+                                        sourceBuffer.mode = 'segments';
+
+                                        sourceBuffer.addEventListener('updateend', () => {
+                                            if (queue.length > 0 && !sourceBuffer.updating) {
+                                                try {
+                                                    sourceBuffer.appendBuffer(queue.shift());
+                                                } catch (e) {
+                                                    log('Buffer append error: ' + e.message);
+                                                }
+                                            }
+                                        });
+
+                                        sourceBuffer.addEventListener('error', (e) => {
+                                            log('SourceBuffer error: ' + e);
+                                        });
+
+                                        video.play().then(() => {
+                                            log('Playing via MSE SUCCESS');
+                                            updateStatus('Playing: ' + streamName);
+                                            setTimeout(() => {
+                                                if (statusDiv) statusDiv.style.display = 'none';
+                                            }, 3000);
+                                        }).catch(e => {
+                                            log('MSE play error: ' + e.message);
+                                            updateStatus('Play error');
+                                        });
+                                    } else {
+                                        log('MSE codec not supported: ' + msg.value);
+                                        updateStatus('Codec not supported');
+                                    }
+                                } else if (msg.type === 'error') {
+                                    log('Server error: ' + msg.value);
+                                    updateStatus('Server error');
+                                }
+                            } else if (event.data instanceof ArrayBuffer && sourceBuffer) {
+                                if (!sourceBuffer.updating && queue.length === 0) {
+                                    try {
+                                        sourceBuffer.appendBuffer(event.data);
+                                    } catch (e) {
+                                        if (e.name === 'QuotaExceededError') {
+                                            log('Buffer full, trimming...');
+                                            try {
+                                                const buffered = sourceBuffer.buffered;
+                                                if (buffered.length > 0) {
+                                                    sourceBuffer.remove(0, buffered.end(0) - 30);
+                                                }
+                                            } catch (removeError) {
+                                                log('Buffer trim error: ' + removeError.message);
+                                            }
+                                        }
+                                        queue.push(event.data);
+                                    }
+                                } else {
+                                    queue.push(event.data);
+                                }
+                            }
+                        } catch (e) {
+                            log('Message error: ' + e.message);
+                        }
+                    };
+
+                    websocket.onerror = (error) => {
+                        log('WebSocket ERROR');
+                        log('URL: ' + streamUrl);
+                        log('ReadyState: ' + websocket.readyState);
+                        updateStatus('Connection error');
+                    };
+
+                    websocket.onclose = (event) => {
+                        log('WebSocket closed (code: ' + event.code + ', reason: ' + event.reason + ')');
+
+                        if (reconnectAttempts < maxReconnectAttempts) {
+                            reconnectAttempts++;
+                            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 30000);
+                            log('Reconnecting in ' + (delay / 1000) + 's (attempt ' + reconnectAttempts + ')');
+                            updateStatus('Reconnecting... (' + reconnectAttempts + '/' + maxReconnectAttempts + ')');
+                            reconnectTimeout = setTimeout(startStream, delay);
+                        } else {
+                            log('Max reconnect attempts reached');
+                            updateStatus('Connection lost');
+                            setTimeout(() => {
+                                reconnectAttempts = 0;
+                                startStream();
+                            }, 60000);
+                        }
+                    };
+
+                } catch (error) {
+                    log('Fatal error: ' + error.message + ' | Stack: ' + (error.stack || 'no stack'));
+                    updateStatus('Error: ' + error.message);
+
+                    if (reconnectAttempts < maxReconnectAttempts) {
+                        reconnectAttempts++;
+                        setTimeout(startStream, 5000);
+                    }
+                }
+            }
+
+            function fallbackToMSE() {
+                try {
+                    if (mode === 'mse') {
+                        log('Already in MSE mode, skipping fallback');
+                        return;
+                    }
+
+                    log('Switching to MSE fallback');
+                    updateStatus('Trying MSE...');
+
+                    if (pc) {
+                        pc.close();
+                        pc = null;
+                    }
+
+                    if (webrtcTimeout) {
+                        clearTimeout(webrtcTimeout);
+                        webrtcTimeout = null;
+                    }
+
+                    mediaSource = new MediaSource();
+                    video.src = URL.createObjectURL(mediaSource);
+                    queue = [];
+
+                    mediaSource.addEventListener('sourceopen', () => {
+                        log('MediaSource opened, requesting codec');
+                        if (websocket && websocket.readyState === WebSocket.OPEN) {
+                            websocket.send(JSON.stringify({
+                                type: 'mse',
+                                value: 'video/mp4; codecs="avc1.640029,mp4a.40.2"'
+                            }));
+                            log('MSE codec request sent');
+                        } else {
+                            log('WebSocket not ready for MSE request');
+                        }
+                    });
+
+                    mediaSource.addEventListener('sourceended', () => {
+                        log('MediaSource ended');
+                    });
+
+                    mediaSource.addEventListener('error', (e) => {
+                        log('MediaSource error: ' + e);
+                    });
+                } catch (e) {
+                    log('MSE fallback error: ' + e.message);
+                    updateStatus('MSE setup failed');
+                }
+            }
+
+            // Start the stream
+            log('=== Stream Viewer Initialized ===');
+            log('Fire OS / Amazon WebView Optimizations: ENABLED');
+            log('Trickle ICE: DISABLED (Amazon compatibility)');
+            log('H.264 Profile Filter: ENABLED (Constrained Baseline only)');
+            startStream();
+
+        } catch (error) {
+            console.error('Script initialization error:', error);
+            document.getElementById('status').textContent = 'Script error: ' + error.message;
+        }
+    })();
+</script>
+</body>
+</html>
