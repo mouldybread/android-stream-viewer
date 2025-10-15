@@ -7,7 +7,7 @@
 Turn your Android device into a network camera viewer with go2rtc integration and a HTTP api for home assistant integration.
 
 > [!NOTE]
-> I am *not* a programmer. This was developed with the help of AI. I use my displays to show cctv and wanted an automation friendly way to show video streams from go2rtc on my Android TV based devices. Do not expect much if anything in the way of support or features. It is however trivial to fork the code and adjust it should it not fit your usecase. It is released here, as is, in the hopes that it will help or inspire others.
+> I am *not* a programmer. This was developed with the help of AI. I needed an automation friendly way to show video streams from go2rtc on my Android TV based devices. Do not expect much if anything in the way of support or additional features. It is however trivial to fork the code and adjust it should it not fit your usecase. It is released here, as is, in the hopes that it will help or inspire others.
 
 > [!CAUTION]
 > This application has **NO built-in authentication or encryption**. Much like go2rtc itself the web server runs on port 9090 with **unrestricted access** to anyone who can reach the device on your network.
