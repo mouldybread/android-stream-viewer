@@ -17,6 +17,8 @@ Turn your Android device into a network camera viewer with go2rtc integration an
 > ❌ **DO NOT** use on untrusted networks (public WiFi, etc.)  
 > ❌ **DO NOT** assume any built-in security exists  
 
+> [!IMPORTANT]
+> ⚠️ Burn-In Prevention Disclaimer: While this app includes a burn-in prevention feature that periodically blanks the screen to reduce the risk of screen burn-in, this feature may not be sufficient for all devices and usage scenarios. OLED and certain LCD displays are particularly susceptible to burn-in from static images displayed for extended periods. Users are responsible for implementing their own mitigation strategies appropriate to their specific device and usage patterns. Best practice: Regularly change the displayed content by using tour mode, setting reasonable display timeouts, or scheduling automatic camera rotations. Static camera views displayed 24/7, even with blanking enabled, can still result in permanent screen damage over time. I assume no responsibility for screen burn-in or damage resulting from use of this application.
 
 ## Features
 
