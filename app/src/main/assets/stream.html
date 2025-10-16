@@ -4,24 +4,51 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { background: #000; overflow: hidden; }
-        video { width: 100vw; height: 100vh; object-fit: cover; background: #000; }
-        #status {
-            position: fixed;
-            top: 20px;
-            left: 20px;
-            background: rgba(0, 0, 0, 0.7);
-            color: white;
-            padding: 10px 15px;
-            border-radius: 5px;
-            font-size: 14px;
-            font-family: Arial, sans-serif;
-            z-index: 1000;
+        body {
+            background: #000;
+            overflow: hidden;
         }
+        video {
+            width: 100vw;
+            height: 100vh;
+            object-fit: cover;
+            background: #000 !important;
+        }
+
+        /* Remove all default video controls and poster images */
+        video::-webkit-media-controls {
+            display: none !important;
+        }
+
+        video::-webkit-media-controls-enclosure {
+            display: none !important;
+        }
+
+        video::poster {
+            display: none !important;
+        }
+
+        video::-webkit-media-controls-start-playback-button {
+            display: none !important;
+        }
+
+                #status {
+                    position: fixed;
+                    top: 20px;
+                    left: 20px;
+                    background: rgba(0, 0, 0, 0.7);
+                    color: white;
+                    padding: 10px 15px;
+                    border-radius: 5px;
+                    font-size: 14px;
+                    font-family: Arial, sans-serif;
+                    z-index: 1000;
+                }
     </style>
 </head>
 <body>
-<video id="player" autoplay playsinline muted preload="auto" webkit-playsinline></video>
+<video id="player" autoplay playsinline muted preload="auto" webkit-playsinline poster="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"></video>
+
 <div id="status">Connecting...</div>
 
 <script>
