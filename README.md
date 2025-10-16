@@ -70,6 +70,8 @@ See home-assistant/README.md for setup instructions.
 
 Tested on an Amazon Echo Show 5 & CCwGTV 4K
 
+Some devices may struggle with WebRTC. In which case use a lower bitrate/framerate/resolution or switch to MSE.
+
 ## Building from Source
 
 ./gradlew assembleRelease
