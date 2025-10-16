@@ -25,13 +25,13 @@ jobs:
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
     
-    - name: Build Release APK
-      run: ./gradlew assembleRelease --stacktrace
+    - name: Build Debug APK
+      run: ./gradlew assembleDebug
     
     - name: Get APK Path
       id: apk
       run: |
-        APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+        APK_PATH=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
         echo "Found APK: $APK_PATH"
         echo "path=$APK_PATH" >> $GITHUB_OUTPUT
     
