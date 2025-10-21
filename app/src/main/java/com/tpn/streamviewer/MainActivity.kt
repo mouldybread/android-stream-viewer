@@ -51,6 +51,12 @@ class MainActivity : AppCompatActivity() {
     private val BURN_IN_INTERVAL = 2 * 60 * 60 * 1000L  // 2 hours in milliseconds
     private val BURN_IN_DURATION = 60 * 1000L  // 1 minute in milliseconds
 
+    // Stream health monitoring
+    private val streamHealthHandler = Handler(Looper.getMainLooper())
+    private var lastStreamActivity = System.currentTimeMillis()
+    private val STREAM_TIMEOUT = 30 * 1000L
+    private var streamHealthCheckActive = false
+
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -93,7 +99,7 @@ class MainActivity : AppCompatActivity() {
                     @Suppress("DEPRECATION")
                     databaseEnabled = true
                     mediaPlaybackRequiresUserGesture = false
-                    cacheMode = WebSettings.LOAD_DEFAULT
+                    cacheMode = WebSettings.LOAD_NO_CACHE
                     mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                     allowFileAccess = false
                     allowContentAccess = false
@@ -125,6 +131,13 @@ class MainActivity : AppCompatActivity() {
                 ) {
                     Log.e(tag, "WebView error: $description (code: $errorCode) at $failingUrl")
                     webServer?.addLog("WebView error: $description")
+
+                    if (currentStreamName.isNotEmpty() && currentGo2rtcUrl.isNotEmpty()) {
+                        Handler(Looper.getMainLooper()).postDelayed({
+                            Log.d(tag, "Attempting stream recovery after error...")
+                            playStream(currentGo2rtcUrl, currentStreamName, currentProtocol)
+                        }, 5000)
+                    }
                 }
             }
 
@@ -146,6 +159,29 @@ class MainActivity : AppCompatActivity() {
                     return true
                 }
             }
+
+
+            // JavaScript interface to monitor stream health
+            webView.addJavascriptInterface(object {
+                @Suppress("unused")
+                @android.webkit.JavascriptInterface
+                fun onStreamPlaying() {
+                    runOnUiThread {
+                        lastStreamActivity = System.currentTimeMillis()
+                        Log.d(tag, "Stream heartbeat received")
+                    }
+                }
+
+                @Suppress("unused")
+                @android.webkit.JavascriptInterface
+                fun onStreamError(message: String) {
+                    runOnUiThread {
+                        Log.e(tag, "Stream error from JS: $message")
+                        webServer?.addLog("Stream error: $message")
+                        checkStreamHealth()
+                    }
+                }
+            }, "AndroidInterface")
 
             // Start web server first
             startWebServer()
@@ -176,6 +212,63 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             Log.e(tag, "CRITICAL ERROR in onCreate", e)
             Toast.makeText(this, "Startup error: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+
+    private fun startStreamHealthMonitoring() {
+        if (streamHealthCheckActive) return
+        streamHealthCheckActive = true
+        lastStreamActivity = System.currentTimeMillis()
+
+        streamHealthHandler.postDelayed(object : Runnable {
+            override fun run() {
+                if (!streamHealthCheckActive) return
+
+                val timeSinceActivity = System.currentTimeMillis() - lastStreamActivity
+                if (timeSinceActivity > STREAM_TIMEOUT && currentStreamName.isNotEmpty()) {
+                    Log.w(tag, "Stream appears frozen (${timeSinceActivity}ms since activity)")
+                    webServer?.addLog("Stream timeout detected - attempting recovery")
+
+                    cleanupWebView()
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        playStream(currentGo2rtcUrl, currentStreamName, currentProtocol)
+                    }, 1000)
+                }
+
+                streamHealthHandler.postDelayed(this, 10000)
+            }
+        }, 10000)
+    }
+
+    private fun stopStreamHealthMonitoring() {
+        streamHealthCheckActive = false
+        streamHealthHandler.removeCallbacksAndMessages(null)
+    }
+
+    private fun checkStreamHealth() {
+        val timeSinceActivity = System.currentTimeMillis() - lastStreamActivity
+        if (timeSinceActivity > STREAM_TIMEOUT) {
+            Log.w(tag, "Stream health check failed")
+            webServer?.addLog("Stream health check failed - reloading")
+            cleanupWebView()
+            Handler(Looper.getMainLooper()).postDelayed({
+                playStream(currentGo2rtcUrl, currentStreamName, currentProtocol)
+            }, 1000)
+        }
+    }
+
+    private fun cleanupWebView() {
+        try {
+            runOnUiThread {
+                webView.stopLoading()
+                webView.loadUrl("about:blank")
+                webView.clearCache(true)
+                webView.clearHistory()
+                Log.d(tag, "WebView cleaned up")
+            }
+        } catch (e: Exception) {
+            Log.e(tag, "Error cleaning up WebView", e)
         }
     }
 
@@ -453,6 +546,9 @@ class MainActivity : AppCompatActivity() {
             Log.d(tag, "Stream Name: $streamName")
             Log.d(tag, "Protocol: $protocol")
 
+            stopStreamHealthMonitoring()
+            cleanupWebView()
+
             currentGo2rtcUrl = go2rtcUrl
             currentStreamName = streamName
             currentProtocol = protocol
@@ -688,6 +784,27 @@ class MainActivity : AppCompatActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) hideSystemUI()
+    }
+
+
+    override fun onPause() {
+        super.onPause()
+        try {
+            webView.onPause()
+            webView.pauseTimers()
+        } catch (e: Exception) {
+            Log.e(tag, "Error in onPause", e)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        try {
+            webView.onResume()
+            webView.resumeTimers()
+        } catch (e: Exception) {
+            Log.e(tag, "Error in onResume", e)
+        }
     }
 
     override fun onDestroy() {

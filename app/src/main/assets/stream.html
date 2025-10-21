@@ -500,6 +500,107 @@
                             setTimeout(() => {
                                 reconnectAttempts = 0;
                                 startStream();
+
+            // === HEALTH MONITORING ADDITIONS ===
+
+            // Video element event listeners for health monitoring
+            video.addEventListener('playing', () => {
+                log('Video is playing');
+                updateStatus('Playing');
+                if (window.AndroidInterface) {
+                    try {
+                        window.AndroidInterface.onStreamPlaying();
+                    } catch (e) {
+                        console.error('Failed to send playing event:', e);
+                    }
+                }
+            });
+
+            video.addEventListener('pause', () => {
+                log('Video paused');
+            });
+
+            video.addEventListener('stalled', () => {
+                log('Video stalled', true);
+                if (window.AndroidInterface) {
+                    try {
+                        window.AndroidInterface.onStreamError('Video stalled');
+                    } catch (e) {
+                        console.error('Failed to report stall:', e);
+                    }
+                }
+            });
+
+            video.addEventListener('waiting', () => {
+                log('Video buffering...');
+            });
+
+            video.addEventListener('error', (e) => {
+                const error = video.error;
+                let errorMsg = 'Video error';
+                if (error) {
+                    errorMsg += ': ' + error.code + ' - ' + error.message;
+                }
+                log(errorMsg, true);
+                updateStatus('Video error', true);
+
+                if (window.AndroidInterface) {
+                    try {
+                        window.AndroidInterface.onStreamError(errorMsg);
+                    } catch (err) {
+                        console.error('Failed to report video error:', err);
+                    }
+                }
+            });
+
+            video.addEventListener('loadeddata', () => {
+                log('Video data loaded');
+            });
+
+            video.addEventListener('canplay', () => {
+                log('Video can play');
+            });
+
+            // Heartbeat to Android every 5 seconds
+            setInterval(() => {
+                if (window.AndroidInterface) {
+                    try {
+                        window.AndroidInterface.onStreamPlaying();
+                    } catch (e) {
+                        console.error('Failed to send heartbeat:', e);
+                    }
+                }
+            }, 5000);
+
+            // Monitor video frame updates
+            let lastFrameTime = Date.now();
+            let frameCheckInterval = setInterval(() => {
+                if (video.readyState >= 2) { // HAVE_CURRENT_DATA or better
+                    const now = Date.now();
+                    const timeSinceLastFrame = now - lastFrameTime;
+
+                    if (timeSinceLastFrame > 15000) { // 15 seconds without frames
+                        log('No video frames for ' + (timeSinceLastFrame/1000) + 's', true);
+                        if (window.AndroidInterface) {
+                            try {
+                                window.AndroidInterface.onStreamError('No frames for ' + (timeSinceLastFrame/1000) + 's');
+                            } catch (e) {
+                                console.error('Failed to report frame timeout:', e);
+                            }
+                        }
+                    }
+                    lastFrameTime = now;
+                }
+            }, 10000); // Check every 10 seconds
+
+            // Cleanup on page unload
+            window.addEventListener('beforeunload', () => {
+                clearInterval(frameCheckInterval);
+                cleanup();
+            });
+
+            // === END HEALTH MONITORING ===
+
                             }, 60000);
                         }
                     };
