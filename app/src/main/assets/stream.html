@@ -139,55 +139,92 @@
             });
 
             function cleanup() {
-                try {
-                    if (webrtcTimeout) {
-                        clearTimeout(webrtcTimeout);
-                        webrtcTimeout = null;
-                    }
+    log('Cleaning up connections...');
+    try {
+        if (webrtcTimeout) {
+            clearTimeout(webrtcTimeout);
+            webrtcTimeout = null;
+        }
 
-                    if (reconnectTimeout) {
-                        clearTimeout(reconnectTimeout);
-                        reconnectTimeout = null;
-                    }
+        if (reconnectTimeout) {
+            clearTimeout(reconnectTimeout);
+            reconnectTimeout = null;
+        }
 
-                    if (pc) {
-                        pc.ontrack = null;
-                        pc.oniceconnectionstatechange = null;
-                        pc.onicecandidate = null;
-                        pc.close();
-                        pc = null;
-                    }
-
-                    if (sourceBuffer) {
-                        try {
-                            if (!sourceBuffer.updating) {
-                                sourceBuffer.abort();
-                            }
-                        } catch (e) {
-                            log('SourceBuffer cleanup error: ' + e.message);
-                        }
-                        sourceBuffer = null;
-                    }
-
-                    if (mediaSource && mediaSource.readyState === 'open') {
-                        try {
-                            mediaSource.endOfStream();
-                        } catch (e) {
-                            log('MediaSource cleanup error: ' + e.message);
-                        }
-                    }
-                    mediaSource = null;
-
-                    if (video.srcObject) {
-                        video.srcObject = null;
-                    }
-
-                    queue = [];
-                    mode = null;
-                } catch (e) {
-                    log('Cleanup error: ' + e.message);
+        // Clean up WebSocket
+        if (websocket) {
+            try {
+                websocket.onopen = null;
+                websocket.onmessage = null;
+                websocket.onerror = null;
+                websocket.onclose = null;
+                if (websocket.readyState === WebSocket.OPEN ||
+                    websocket.readyState === WebSocket.CONNECTING) {
+                    websocket.close();
                 }
+            } catch (e) {
+                log('WebSocket cleanup error: ' + e.message);
             }
+            websocket = null;
+        }
+
+        // Clean up RTCPeerConnection
+        if (pc) {
+            pc.ontrack = null;
+            pc.oniceconnectionstatechange = null;
+            pc.onicecandidate = null;
+            pc.close();
+            pc = null;
+        }
+
+        // Clean up SourceBuffer
+        if (sourceBuffer) {
+            try {
+                if (!sourceBuffer.updating) {
+                    sourceBuffer.abort();
+                }
+            } catch (e) {
+                log('SourceBuffer cleanup error: ' + e.message);
+            }
+            sourceBuffer = null;
+        }
+
+        // Clean up MediaSource
+        if (mediaSource && mediaSource.readyState === 'open') {
+            try {
+                mediaSource.endOfStream();
+            } catch (e) {
+                log('MediaSource cleanup error: ' + e.message);
+            }
+        }
+        mediaSource = null;
+
+        // CRITICAL FIX: Properly stop all video tracks
+        if (video.srcObject) {
+            try {
+                const tracks = video.srcObject.getTracks();
+                tracks.forEach(track => {
+                    track.stop();
+                    log('Stopped track: ' + track.kind);
+                });
+            } catch (e) {
+                log('Track stop error: ' + e.message);
+            }
+            video.srcObject = null;
+        }
+
+        // Clear video element completely
+        video.src = '';
+        video.load();
+        video.removeAttribute('src');
+
+        queue = [];
+        mode = null;
+    } catch (e) {
+        log('Cleanup error: ' + e.message);
+    }
+}
+
 
             async function startStream() {
                 try {
