@@ -88,6 +88,7 @@ class AndroidWebServer(
             uri == "/api/tour/stop" && method == Method.POST -> handleTourStop()
             uri == "/api/logs" && method == Method.GET -> handleGetLogs()
             uri == "/api/save-server-url" && method == Method.POST -> handleSaveServerUrl(session)
+            uri == "/api/scan-cameras" && method == Method.POST -> handleScanCameras()
 
             // NEW ENDPOINTS
             uri == "/api/status" && method == Method.GET -> handleGetStatus()
@@ -132,6 +133,104 @@ class AndroidWebServer(
                 Response.Status.INTERNAL_ERROR,
                 "application/json",
                 JSONObject().put("error", e.message).toString()
+            )
+        }
+    }
+
+    private fun handleScanCameras(): Response {
+        return try {
+            if (go2rtcServerUrl.isEmpty()) {
+                addLog("Scan failed: No go2rtc server configured")
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    JSONObject().put("success", false).put("message", "No go2rtc server configured").toString()
+                )
+            }
+
+            addLog("Scanning cameras from: $go2rtcServerUrl")
+
+            // Fetch streams from go2rtc
+            val streamsUrl = "$go2rtcServerUrl/api/streams"
+            val connection = URL(streamsUrl).openConnection() as HttpURLConnection
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 5000
+            connection.readTimeout = 5000
+
+            val responseCode = connection.responseCode
+            if (responseCode == 200) {
+                val response = connection.inputStream.bufferedReader().readText()
+                val streamsJson = JSONObject(response)
+
+                // Parse streams and create cameras
+                val newCameras = mutableListOf<CameraConfig>()
+                val existingCameras = getCameras()
+                var order = existingCameras.size
+
+                streamsJson.keys().forEach { streamName ->
+                    // Skip if camera already exists
+                    if (existingCameras.none { it.streamName == streamName }) {
+                        newCameras.add(
+                            CameraConfig(
+                                id = java.util.UUID.randomUUID().toString(),
+                                name = streamName.uppercase(),
+                                streamName = streamName,
+                                enabled = true,
+                                protocol = "mse",
+                                order = order++
+                            )
+                        )
+                    }
+                }
+
+                // Save all cameras
+                if (newCameras.isNotEmpty()) {
+                    val allCameras = existingCameras + newCameras
+                    saveCameras(allCameras)
+                    addLog("Imported ${newCameras.size} new cameras")
+
+                    return newFixedLengthResponse(
+                        Response.Status.OK,
+                        "application/json",
+                        JSONObject()
+                            .put("success", true)
+                            .put("message", "Imported ${newCameras.size} cameras")
+                            .put("count", newCameras.size)
+                            .toString()
+                    )
+                } else {
+                    addLog("No new cameras found")
+                    return newFixedLengthResponse(
+                        Response.Status.OK,
+                        "application/json",
+                        JSONObject()
+                            .put("success", true)
+                            .put("message", "No new cameras found")
+                            .put("count", 0)
+                            .toString()
+                    )
+                }
+            } else {
+                addLog("Scan failed: HTTP $responseCode")
+                return newFixedLengthResponse(
+                    Response.Status.INTERNAL_ERROR,
+                    "application/json",
+                    JSONObject()
+                        .put("success", false)
+                        .put("message", "Failed to connect to go2rtc server (HTTP $responseCode)")
+                        .toString()
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error scanning cameras", e)
+            addLog("Scan error: ${e.message}")
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                JSONObject()
+                    .put("success", false)
+                    .put("message", "Error: ${e.message}")
+                    .toString()
             )
         }
     }
