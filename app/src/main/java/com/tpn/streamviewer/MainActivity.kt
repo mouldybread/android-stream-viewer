@@ -2,6 +2,7 @@ package com.tpn.streamviewer
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -209,12 +210,58 @@ class MainActivity : AppCompatActivity() {
                 startBurnInProtection()
             }, 5000)
 
+            // Handle intent after everything is initialized
+            Handler(Looper.getMainLooper()).postDelayed({
+                handleIntent(intent)
+            }, 3000)
+
         } catch (e: Exception) {
             Log.e(tag, "CRITICAL ERROR in onCreate", e)
             Toast.makeText(this, "Startup error: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIntent(intent)
+    }
+
+    private fun handleIntent(intent: Intent?) {
+        intent?.let {
+            // Check for camera name extra
+            val cameraName = it.getStringExtra("camera_name")
+            if (cameraName != null) {
+                Log.d(tag, "Intent received with camera_name: $cameraName")
+                webServer?.addLog("Intent: Loading camera '$cameraName'")
+
+                // Load the camera list and find matching camera
+                val cameras = loadCameras()
+                val camera = cameras.find { cam ->
+                    cam.name.equals(cameraName, ignoreCase = true) ||
+                            cam.streamName.equals(cameraName, ignoreCase = true)
+                }
+
+                if (camera != null) {
+                    // Get the go2rtc server URL
+                    val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+                    val serverUrl = prefs.getString("go2rtcServerUrl", "") ?: ""
+
+                    if (serverUrl.isNotEmpty()) {
+                        Log.d(tag, "Playing camera: ${camera.name} (${camera.streamName})")
+                        playStream(serverUrl, camera.streamName, camera.protocol)
+                        Toast.makeText(this, "Loading: ${camera.name}", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Log.e(tag, "No go2rtc server URL configured")
+                        Toast.makeText(this, "Error: No server URL configured", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    Log.w(tag, "Camera not found: $cameraName")
+                    Toast.makeText(this, "Camera not found: $cameraName", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
 
     private fun startStreamHealthMonitoring() {
         if (streamHealthCheckActive) return
