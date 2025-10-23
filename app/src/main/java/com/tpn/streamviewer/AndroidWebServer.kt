@@ -32,7 +32,6 @@ class AndroidWebServer(
     private val maxLogs = 500
 
     var go2rtcServerUrl: String = ""
-        private set
 
     // Track current state
     private var currentStreamName: String? = null
@@ -80,6 +79,7 @@ class AndroidWebServer(
             uri == "/api/tour/start" && method == Method.POST -> handleTourStart(session)
             uri == "/api/tour/stop" && method == Method.POST -> handleTourStop()
             uri == "/api/logs" && method == Method.GET -> handleGetLogs()
+            uri == "/api/save-server-url" && method == Method.POST -> handleSaveServerUrl(session)
 
             // NEW ENDPOINTS
             uri == "/api/status" && method == Method.GET -> handleGetStatus()
@@ -93,6 +93,34 @@ class AndroidWebServer(
             uri == "/" -> serveFile("index.html")
             uri.startsWith("/") -> serveFile(uri.substring(1))
             else -> newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not Found")
+        }
+    }
+
+    private fun handleSaveServerUrl(session: IHTTPSession): Response {
+        return try {
+            val files = HashMap<String, String>()
+            session.parseBody(files)
+            val postData = files["postData"] ?: ""
+            val json = JSONObject(postData)
+
+            val url = json.getString("url")
+            go2rtcServerUrl = url
+
+            addLog("go2rtc server URL saved: $url")
+
+            newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                JSONObject().put("success", true).toString()
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error saving server URL", e)
+            addLog("Save server URL error: ${e.message}")
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                JSONObject().put("error", e.message).toString()
+            )
         }
     }
 

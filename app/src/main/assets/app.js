@@ -258,6 +258,12 @@ async function discoverCameras() {
 
         document.getElementById('discover-status').textContent = `✓ Found ${streamNames.length} streams, added ${added} new`;
         updateStatus(`✓ Added ${added} cameras`, 'success');
+        // Save server URL to AndroidWebServer
+        fetch('/api/save-server-url', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: url })
+        }).catch(err => console.error('Failed to save server URL:', err));
     } catch (error) {
         console.error('Discovery error:', error);
         document.getElementById('discover-status').textContent = '✗ Failed: ' + error.message;
