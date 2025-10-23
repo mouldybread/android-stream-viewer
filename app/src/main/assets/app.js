@@ -62,6 +62,13 @@ function loadSavedGo2rtcUrl() {
         urlInput.value = savedUrl;
         urlInput.disabled = true;
         removeBtn.style.display = 'inline-block';
+
+        // Sync to Android SharedPreferences
+        fetch('/api/save-server-url', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: savedUrl })
+        }).catch(err => console.error('Failed to sync server URL to Android:', err));
     } else {
         urlInput.disabled = false;
         removeBtn.style.display = 'none';
