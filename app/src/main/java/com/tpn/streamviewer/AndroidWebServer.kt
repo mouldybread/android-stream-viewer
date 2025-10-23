@@ -45,6 +45,14 @@ class AndroidWebServer(
     init {
         Log.d(TAG, "Server initialized on port $port")
         addLog("Server initialized on port $port")
+
+        // Load saved go2rtc URL from last discovery
+        val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+        go2rtcServerUrl = prefs.getString("go2rtc_server_url", "") ?: ""
+        if (go2rtcServerUrl.isNotEmpty()) {
+            Log.d(TAG, "Loaded saved go2rtc URL: $go2rtcServerUrl")
+            addLog("Loaded go2rtc URL: $go2rtcServerUrl")
+        }
     }
 
     fun addLog(message: String) {
@@ -105,6 +113,10 @@ class AndroidWebServer(
 
             val url = json.getString("url")
             go2rtcServerUrl = url
+
+            // Also save to SharedPreferences for persistence
+            val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+            prefs.edit().putString("go2rtc_server_url", url).apply()
 
             addLog("go2rtc server URL saved: $url")
 
@@ -385,6 +397,10 @@ class AndroidWebServer(
 
             val serverUrl = json.getString("serverUrl").trimEnd('/')
             go2rtcServerUrl = serverUrl
+
+            // Save the URL to SharedPreferences for persistence
+            val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+            prefs.edit().putString("go2rtc_server_url", serverUrl).apply()
 
             addLog("Discovering cameras from: $serverUrl")
 
