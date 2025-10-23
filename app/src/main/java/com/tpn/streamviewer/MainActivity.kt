@@ -243,9 +243,8 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 if (camera != null) {
-                    // Get the go2rtc server URL
-                    val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
-                    val serverUrl = prefs.getString("go2rtcServerUrl", "") ?: ""
+                    // Get the go2rtc server URL from webServer state
+                    val serverUrl = webServer?.go2rtcServerUrl ?: ""
 
                     if (serverUrl.isNotEmpty()) {
                         Log.d(tag, "Playing camera: ${camera.name} (${camera.streamName})")
@@ -253,7 +252,7 @@ class MainActivity : AppCompatActivity() {
                         Toast.makeText(this, "Loading: ${camera.name}", Toast.LENGTH_SHORT).show()
                     } else {
                         Log.e(tag, "No go2rtc server URL configured")
-                        Toast.makeText(this, "Error: No server URL configured", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this, "Error: No server URL configured", Toast.LENGTH_LONG).show()
                     }
                 } else {
                     Log.w(tag, "Camera not found: $cameraName")
