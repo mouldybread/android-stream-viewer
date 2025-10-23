@@ -1,14 +1,14 @@
 # Home Assistant Integration
 
-Home Assistant integration for Android Stream Viewer.
+Home Assistant integration for Android Stream Viewer with support for intent-based camera launching.
 
 <p align="center">
   <img src="ha.png" alt="Home Assistant Integration Example" />
 </p>
 
-
 ## Table of Contents
 - [Setup](#setup)
+- [Intent-Based Camera Launch](#intent-based-camera-launch)
 - [Features](#features)
 - [Sensors](#sensors)
 - [Scripts](#scripts)
@@ -22,34 +22,99 @@ Home Assistant integration for Android Stream Viewer.
 - Android Stream Viewer app installed and running
 - go2rtc server configured
 - Home Assistant with REST integration enabled
+- (Optional) Display Launcher app for intent-based launching
 
-### 1. Add REST Sensors (rest.yaml)
+### 1. Add REST Commands (configuration.yaml)
 
-Replace `<DEVICE_IP>` with your Android device's IP address (e.g., 192.168.1.100).
+Replace `<DEVICE_IP>` with your Android device's IP address and `<GO2RTC_IP>` with your go2rtc server IP.
 
 ```yaml
-# Camera names (dynamic list)
-- resource: http://<DEVICE_IP>:9090/api/camera-names
-  scan_interval: 60
-  sensor:
-    - name: "Stream Viewer Camera Names"
+rest_command:
+# Play specific camera via API
+  stream_viewer_play:
+    url: "http://<DEVICE_IP>:9090/api/config"
+    method: POST
+    content_type: "application/json"
+    payload: >
+      {"go2rtcUrl": "http://<GO2RTC_IP>:1984", "streamName": "{{ camera }}", "protocol": "{{ protocol | default('mse') }}"}
+# Launch app with intent (requires display launcher app)
+  launch_app_with_intent:
+    url: "http://<DEVICE_IP>:9091/api/launch-intent"
+    method: POST
+    content_type: "application/json"
+    payload: '{"packageName": "{{ package_name }}", "action": "{{ action }}", "data": "{{ data }}", "extra_string": "{{ extra_string | default("") }}"}'
+    timeout: 10
+# Play default camera
+  stream_viewer_play_default:
+    url: "http://<DEVICE_IP>:9090/api/config"
+    method: POST
+    content_type: "application/json"
+    payload: >
+      {"go2rtcUrl": "http://<GO2RTC_IP>:1984", "streamName": "{{ state_attr('sensor.stream_viewer_status', 'defaultStream') }}", "protocol": "mse"}
+# Stop stream
+  stream_viewer_stop:
+    url: "http://<DEVICE_IP>:9090/api/tour/stop"
+    method: POST
+# Start tour
+  stream_viewer_tour_start:
+    url: "http://<DEVICE_IP>:9090/api/tour/start"
+    method: POST
+    content_type: "application/json"
+    payload: >
+      {"duration": {{ duration | default(10) }}}
+# Stop tour
+  stream_viewer_tour_stop:
+    url: "http://<DEVICE_IP>:9090/api/tour/stop"
+    method: POST
+# Toggle camera enabled/disabled
+  stream_viewer_toggle_camera:
+    url: "http://<DEVICE_IP>:9090/api/camera/{{ camera_id }}/toggle"
+    method: POST
+# Set default camera
+  stream_viewer_set_default:
+    url: "http://<DEVICE_IP>:9090/api/default"
+    method: POST
+    content_type: "application/json"
+    payload: >
+      {"streamName": "{{ camera }}"}
+# Toggle burn-in protection
+  stream_viewer_burn_in_toggle:
+    url: "http://<DEVICE_IP>:9090/api/burn-in/toggle"
+    method: POST
+    content_type: "application/json"
+    payload: >
+      {"enabled": {{ enabled | lower }}}
+```
+
+### 2. Add REST Sensors (rest.yaml)
+
+Replace `<DEVICE_IP>` with your Android device's IP address.
+
+#### Camera names (dynamic list)
+```yaml
+  - resource: http://<DEVICE_IP>:9090/api/camera-names
+    scan_interval: 60
+    sensor:
+      name: "Stream Viewer Camera Names"
       unique_id: stream_viewer_camera_names
       value_template: "{{ value }}"
-
-# Full camera data (JSON with IDs, protocols, order, etc.)
-- resource: http://<DEVICE_IP>:9090/api/cameras
-  scan_interval: 120
-  sensor:
-    - name: "Stream Viewer Camera List"
+```
+#### Full camera data (JSON with IDs, protocols, order, etc.)
+```yaml
+  - resource: http://<DEVICE_IP>:9090/api/cameras
+    scan_interval: 120
+    sensor:
+      name: "Stream Viewer Camera List"
       unique_id: stream_viewer_camera_list
       value_template: "{{ value_json | length }}"
       json_attributes_path: "$"
-
-# Current playback status
-- resource: http://<DEVICE_IP>:9090/api/status
-  scan_interval: 10
-  sensor:
-    - name: "Stream Viewer Status"
+```
+#### Current playback status
+```yaml
+  - resource: http://<DEVICE_IP>:9090/api/status
+    scan_interval: 10
+    sensor:
+      name: "Stream Viewer Status"
       unique_id: stream_viewer_status
       value_template: >
         {{ 'Playing' if value_json.playing else 'Idle' }}
@@ -60,12 +125,13 @@ Replace `<DEVICE_IP>` with your Android device's IP address (e.g., 192.168.1.100
         - tourActive
         - go2rtcUrl
         - defaultStream
-
-# Tour status
-- resource: http://<DEVICE_IP>:9090/api/tour/status
-  scan_interval: 30
-  sensor:
-    - name: "Stream Viewer Tour Status"
+```
+#### Tour status
+```yaml
+  - resource: http://<DEVICE_IP>:9090/api/tour/status
+    scan_interval: 30
+    sensor:
+      name: "Stream Viewer Tour Status"
       unique_id: stream_viewer_tour_status
       value_template: >
         {{ 'Active' if value_json.active else 'Stopped' }}
@@ -73,12 +139,13 @@ Replace `<DEVICE_IP>` with your Android device's IP address (e.g., 192.168.1.100
         - active
         - cameraCount
         - currentStream
-
-# Burn-in protection status
-- resource: http://<DEVICE_IP>:9090/api/burn-in/status
-  scan_interval: 300
-  sensor:
-    - name: "Stream Viewer Burn-In Protection"
+```
+#### Burn-in protection status
+```yaml
+  - resource: http://<DEVICE_IP>:9090/api/burn-in/status
+    scan_interval: 300
+    sensor:
+      name: "Stream Viewer Burn-In Protection"
       unique_id: stream_viewer_burn_in
       value_template: >
         {{ 'Enabled' if value_json.enabled else 'Disabled' }}
@@ -86,18 +153,19 @@ Replace `<DEVICE_IP>` with your Android device's IP address (e.g., 192.168.1.100
         - enabled
         - interval
         - duration
-
-# Server logs (optional - for debugging)
-- resource: http://<DEVICE_IP>:9090/api/logs
-  scan_interval: 60
-  sensor:
-    - name: "Stream Viewer Logs"
+```
+#### Server logs (optional - for debugging)
+```yaml
+  - resource: http://<DEVICE_IP>:9090/api/logs
+    scan_interval: 60
+    sensor:
+      name: "Stream Viewer Logs"
       unique_id: stream_viewer_logs
-      value_template: "{{ value.split('\\n') | length }} lines"
+      value_template: "{{ value.split('
+') | length }} lines"
 ```
 
-### 2. Add Input Select (input_select.yaml)
-
+### 3. Add Input Select (input_select.yaml)
 ```yaml
 stream_viewer_camera:
   name: Camera Viewer
@@ -107,8 +175,114 @@ stream_viewer_camera:
   icon: mdi:cctv
 ```
 
-### 3. Add Automations (automations.yaml)
+### 4. Add Scripts (scripts.yaml)
+```yaml
+# Play specific camera by name (via API)
+stream_viewer_play_camera:
+  alias: "Stream Viewer: Play Camera"
+  description: "Play a specific camera stream via API"
+  fields:
+    camera_name:
+      description: "Camera name to play"
+      example: "FRONTDOOR"
+    protocol:
+      description: "Protocol (mse, webrtc, auto)"
+      example: "mse"
+      default: "mse"
+  sequence:
+    - service: rest_command.stream_viewer_play
+      data:
+        camera: "{{ camera_name }}"
+        protocol: "{{ protocol }}"
+# Play specific camera via intent (requires display launcher)
+stream_viewer_play_camera_intent:
+  alias: "Stream Viewer: Play Camera (Intent)"
+  description: "Play a specific camera stream via Android intent"
+  fields:
+    device_ip:
+      description: "Device IP address"
+      example: "192.168.1.100"
+    camera_name:
+      description: "Camera name to play"
+      example: "FRONTDOOR"
+  sequence:
+    - service: rest_command.launch_app_with_intent
+      data:
+        device_ip: "{{ device_ip }}"
+        package_name: "com.tpn.streamviewer"
+        action: "android.intent.action.MAIN"
+        data: ""
+        extra_string: "camera_name:{{ camera_name }}"
+# Play selected camera from dropdown
+stream_viewer_play_selected:
+  alias: "Stream Viewer: Play Selected Camera"
+  sequence:
+    - service: script.stream_viewer_play_camera
+      data:
+        camera_name: "{{ states('input_select.stream_viewer_camera') }}"
+# Play default camera
+stream_viewer_play_default:
+  alias: "Stream Viewer: Play Default Camera"
+  sequence:
+    - service: rest_command.stream_viewer_play_default
+# Stop current stream
+stream_viewer_stop:
+  alias: "Stream Viewer: Stop Stream"
+  sequence:
+    - service: rest_command.stream_viewer_stop
+# Start camera tour
+stream_viewer_start_tour:
+  alias: "Stream Viewer: Start Tour"
+  fields:
+    duration:
+      description: "Duration per camera in seconds"
+      example: 10
+      default: 10
+  sequence:
+    - service: rest_command.stream_viewer_tour_start
+      data:
+        duration: "{{ duration }}"
+# Stop camera tour
+stream_viewer_stop_tour:
+  alias: "Stream Viewer: Stop Tour"
+  sequence:
+    - service: rest_command.stream_viewer_tour_stop
+# Toggle specific camera on/off
+stream_viewer_toggle_camera:
+  alias: "Stream Viewer: Toggle Camera"
+  fields:
+    camera_id:
+      description: "Camera ID to toggle"
+      example: "1760549119136lrymuktx6"
+  sequence:
+    - service: rest_command.stream_viewer_toggle_camera
+      data:
+        camera_id: "{{ camera_id }}"
+# Toggle burn-in protection
+stream_viewer_toggle_burn_in:
+  alias: "Stream Viewer: Toggle Burn-In Protection"
+  fields:
+    enabled:
+      description: "Enable or disable"
+      example: true
+  sequence:
+    - service: rest_command.stream_viewer_burn_in_toggle
+      data:
+        enabled: "{{ enabled }}"
+# Set default camera
+stream_viewer_set_default:
+  alias: "Stream Viewer: Set Default Camera"
+  fields:
+    camera_name:
+      description: "Camera name to set as default"
+      example: "FRONTDOOR"
+  sequence:
+    - service: rest_command.stream_viewer_set_default
+      data:
+        camera: "{{ camera_name }}"
+```
 
+### 5. Add Automations (automations.yaml)
 ```yaml
 # Auto-populate camera dropdown from API
 - alias: "Stream Viewer: Populate Camera Dropdown"
@@ -131,9 +305,8 @@ stream_viewer_camera:
           {% else %}
             ['Loading...']
           {% endif %}
-  mode: single
-
-# Example: Auto-play camera on doorbell press
+      mode: single
+# Example: Auto-play camera on doorbell press (API method)
 - alias: "Stream Viewer: Show Front Door on Doorbell"
   description: "Show front door camera when doorbell is pressed"
   triggers:
@@ -144,8 +317,20 @@ stream_viewer_camera:
     - service: script.stream_viewer_play_camera
       data:
         camera_name: "FRONTDOOR"
-  mode: single
-
+      mode: single
+# Example: Auto-play camera on doorbell press (Intent method)
+- alias: "Stream Viewer: Show Front Door on Doorbell (Intent)"
+  description: "Show front door camera when doorbell is pressed using intent"
+  triggers:
+    - platform: state
+      entity_id: binary_sensor.front_door_button
+      to: "on"
+  actions:
+    - service: script.stream_viewer_play_camera_intent
+      data:
+        device_ip: "192.168.1.100"
+        camera_name: "FRONTDOOR"
+      mode: single
 # Example: Return to default after 2 minutes
 - alias: "Stream Viewer: Return to Default"
   description: "Return to default camera after doorbell event"
@@ -158,190 +343,103 @@ stream_viewer_camera:
   conditions:
     - condition: template
       value_template: >
-        {{ state_attr('sensor.stream_viewer_status', 'streamName') !=
-           state_attr('sensor.stream_viewer_status', 'defaultStream') }}
+        {{ state_attr('sensor.stream_viewer_status', 'streamName') != state_attr('sensor.stream_viewer_status', 'defaultStream') }}
   actions:
     - service: script.stream_viewer_play_default
-  mode: single
+      mode: single
 ```
 
-### 4. Add Scripts (scripts.yaml)
+## Intent-Based Camera Launch
 
+Intent-based launching allows you to directly open the Stream Viewer app with a specific camera already loaded. This is more reliable than the API method for some use cases and works even if the app is not already running.
+
+### Requirements
+- Display Launcher app installed on the same device
+- Display Launcher configured and running on port 9091
+
+### How It Works
+1. Home Assistant sends an intent request to the Display Launcher app
+2. Display Launcher launches Stream Viewer with the specified camera name as an intent extra
+3. Stream Viewer receives the intent and automatically loads the requested camera
+
+### Advantages Over API Method
+- Works even if Stream Viewer is not running
+- More reliable for automation sequences
+- Brings app to foreground automatically
+- No need for app to maintain background service
+
+### Example: Camera Rotation Automation
 ```yaml
-# Play specific camera by name
-stream_viewer_play_camera:
-  alias: "Stream Viewer: Play Camera"
-  description: "Play a specific camera stream"
-  fields:
-    camera_name:
-      description: "Camera name to play"
-      example: "FRONTDOOR"
-    protocol:
-      description: "Protocol (mse, webrtc, auto)"
-      example: "mse"
-      default: "mse"
-  sequence:
-    - service: rest_command.stream_viewer_play
-      data:
-        camera: "{{ camera_name }}"
-        protocol: "{{ protocol }}"
-
-# Play selected camera from dropdown
-stream_viewer_play_selected:
-  alias: "Stream Viewer: Play Selected Camera"
-  sequence:
-    - service: script.stream_viewer_play_camera
-      data:
-        camera_name: "{{ states('input_select.stream_viewer_camera') }}"
-
-# Play default camera
-stream_viewer_play_default:
-  alias: "Stream Viewer: Play Default Camera"
-  sequence:
-    - service: rest_command.stream_viewer_play_default
-
-# Stop current stream
-stream_viewer_stop:
-  alias: "Stream Viewer: Stop Stream"
-  sequence:
-    - service: rest_command.stream_viewer_stop
-
-# Start camera tour
-stream_viewer_start_tour:
-  alias: "Stream Viewer: Start Tour"
-  fields:
-    duration:
-      description: "Duration per camera in seconds"
-      example: 10
-      default: 10
-  sequence:
-    - service: rest_command.stream_viewer_tour_start
-      data:
-        duration: "{{ duration }}"
-
-# Stop camera tour
-stream_viewer_stop_tour:
-  alias: "Stream Viewer: Stop Tour"
-  sequence:
-    - service: rest_command.stream_viewer_tour_stop
-
-# Toggle specific camera on/off
-stream_viewer_toggle_camera:
-  alias: "Stream Viewer: Toggle Camera"
-  fields:
-    camera_id:
-      description: "Camera ID to toggle"
-      example: "1760549119136lrymuktx6"
-  sequence:
-    - service: rest_command.stream_viewer_toggle_camera
-      data:
-        camera_id: "{{ camera_id }}"
-
-# Toggle burn-in protection
-stream_viewer_toggle_burn_in:
-  alias: "Stream Viewer: Toggle Burn-In Protection"
-  fields:
-    enabled:
-      description: "Enable or disable"
-      example: true
-  sequence:
-    - service: rest_command.stream_viewer_burn_in_toggle
-      data:
-        enabled: "{{ enabled }}"
-
-# Set default camera
-stream_viewer_set_default:
-  alias: "Stream Viewer: Set Default Camera"
-  fields:
-    camera_name:
-      description: "Camera name to set as default"
-      example: "FRONTDOOR"
-  sequence:
-    - service: rest_command.stream_viewer_set_default
-      data:
-        camera: "{{ camera_name }}"
-```
-
-### 5. Add REST Commands (configuration.yaml)
-
-Replace `<DEVICE_IP>` and `<GO2RTC_IP>` with your actual IP addresses.
-
-```yaml
-rest_command:
-  # Play specific camera
-  stream_viewer_play:
-    url: "http://<DEVICE_IP>:9090/api/config"
-    method: POST
-    content_type: "application/json"
-    payload: >
-      {
-        "go2rtcUrl": "http://<GO2RTC_IP>:1984",
-        "streamName": "{{ camera }}",
-        "protocol": "{{ protocol | default('mse') }}"
-      }
-
-  # Play default camera
-  stream_viewer_play_default:
-    url: "http://<DEVICE_IP>:9090/api/config"
-    method: POST
-    content_type: "application/json"
-    payload: >
-      {
-        "go2rtcUrl": "http://<GO2RTC_IP>:1984",
-        "streamName": "{{ state_attr('sensor.stream_viewer_status', 'defaultStream') }}",
-        "protocol": "mse"
-      }
-
-  # Stop stream
-  stream_viewer_stop:
-    url: "http://<DEVICE_IP>:9090/api/tour/stop"
-    method: POST
-
-  # Start tour
-  stream_viewer_tour_start:
-    url: "http://<DEVICE_IP>:9090/api/tour/start"
-    method: POST
-    content_type: "application/json"
-    payload: >
-      {
-        "duration": {{ duration | default(10) }}
-      }
-
-  # Stop tour
-  stream_viewer_tour_stop:
-    url: "http://<DEVICE_IP>:9090/api/tour/stop"
-    method: POST
-
-  # Toggle camera enabled/disabled
-  stream_viewer_toggle_camera:
-    url: "http://<DEVICE_IP>:9090/api/camera/{{ camera_id }}/toggle"
-    method: POST
-
-  # Set default camera
-  stream_viewer_set_default:
-    url: "http://<DEVICE_IP>:9090/api/default"
-    method: POST
-    content_type: "application/json"
-    payload: >
-      {
-        "streamName": "{{ camera }}"
-      }
-
-  # Toggle burn-in protection
-  stream_viewer_burn_in_toggle:
-    url: "http://<DEVICE_IP>:9090/api/burn-in/toggle"
-    method: POST
-    content_type: "application/json"
-    payload: >
-      {
-        "enabled": {{ enabled | lower }}
-      }
+# This automation rotates through multiple cameras on three different devices
+- alias: "Display Control: Camera Rotation"
+  description: "Rotate cameras across three displays"
+  triggers:
+    - platform: state
+      entity_id: input_boolean.display_rotation_toggle
+      from: "off"
+      to: "on"
+  actions:
+    - repeat:
+        sequence:
+          # Show CAMERA1 on Device 1, CAMERA2 on Device 2, CAMERA3 on Device 3
+          - parallel:
+              - service: rest_command.launch_app_with_intent
+                data:
+                  device_ip: "192.168.1.101"
+                  package_name: "com.tpn.streamviewer"
+                  action: "android.intent.action.MAIN"
+                  data: ""
+                  extra_string: "camera_name:CAMERA1"
+              - service: rest_command.launch_app_with_intent
+                data:
+                  device_ip: "192.168.1.102"
+                  package_name: "com.tpn.streamviewer"
+                  action: "android.intent.action.MAIN"
+                  data: ""
+                  extra_string: "camera_name:CAMERA2"
+              - service: rest_command.launch_app_with_intent
+                data:
+                  device_ip: "192.168.1.103"
+                  package_name: "com.tpn.streamviewer"
+                  action: "android.intent.action.MAIN"
+                  data: ""
+                  extra_string: "camera_name:CAMERA3"
+          - delay:
+              minutes: 5
+          # Rotate: Show CAMERA2 on Device 1, CAMERA3 on Device 2, CAMERA1 on Device 3
+          - parallel:
+              - service: rest_command.launch_app_with_intent
+                data:
+                  device_ip: "192.168.1.101"
+                  package_name: "com.tpn.streamviewer"
+                  action: "android.intent.action.MAIN"
+                  data: ""
+                  extra_string: "camera_name:CAMERA2"
+              - service: rest_command.launch_app_with_intent
+                data:
+                  device_ip: "192.168.1.102"
+                  package_name: "com.tpn.streamviewer"
+                  action: "android.intent.action.MAIN"
+                  data: ""
+                  extra_string: "camera_name:CAMERA3"
+              - service: rest_command.launch_app_with_intent
+                data:
+                  device_ip: "192.168.1.103"
+                  package_name: "com.tpn.streamviewer"
+                  action: "android.intent.action.MAIN"
+                  data: ""
+                  extra_string: "camera_name:CAMERA1"
+          - delay:
+              minutes: 5
+        while:
+          - condition: state
+            entity_id: input_boolean.display_rotation_toggle
+            state: "on"
 ```
 
 ## Dashboard Examples
 
 ### Basic Control Card
-
 ```yaml
 type: vertical-stack
 cards:
@@ -369,7 +467,6 @@ cards:
 ```
 
 ### Advanced Control Panel
-
 ```yaml
 type: vertical-stack
 cards:
@@ -427,8 +524,7 @@ cards:
           service: script.stream_viewer_stop_tour
 ```
 
-### Quick Camera Buttons
-
+### Quick Camera Buttons (Intent Method)
 ```yaml
 type: horizontal-stack
 cards:
@@ -437,24 +533,27 @@ cards:
     icon: mdi:door
     tap_action:
       action: call-service
-      service: script.stream_viewer_play_camera
+      service: script.stream_viewer_play_camera_intent
       data:
+        device_ip: "192.168.1.100"
         camera_name: "FRONTDOOR"
   - type: button
     name: Driveway
     icon: mdi:car
     tap_action:
       action: call-service
-      service: script.stream_viewer_play_camera
+      service: script.stream_viewer_play_camera_intent
       data:
+        device_ip: "192.168.1.100"
         camera_name: "DRIVEWAY"
   - type: button
     name: Backyard
     icon: mdi:tree
     tap_action:
       action: call-service
-      service: script.stream_viewer_play_camera
+      service: script.stream_viewer_play_camera_intent
       data:
+        device_ip: "192.168.1.100"
         camera_name: "BACKYARD"
 ```
 
@@ -469,6 +568,8 @@ cards:
 - Default camera configuration
 - Remote camera enable/disable
 - Server log access for debugging
+- **Intent-based camera launching** (requires Display Launcher app)
+- Persistent go2rtc server URL configuration
 
 ### Use Cases
 - Display front door camera on doorbell press
@@ -477,6 +578,8 @@ cards:
 - Return to default view after events
 - Disable unused cameras
 - Monitor currently displayed stream
+- Rotate cameras across multiple display devices
+- Launch specific cameras from automation without API calls
 
 ## Troubleshooting
 
@@ -486,11 +589,24 @@ cards:
 3. Confirm automation is enabled
 4. Verify sensor entity ID matches automation
 
-### Cameras not playing
+### Cameras not playing (API method)
 1. Confirm go2rtc server is running
 2. Verify IP addresses in REST commands
 3. Ensure camera stream names match exactly
 4. View logs: `sensor.stream_viewer_logs`
+
+### Intent launching not working
+1. Confirm Display Launcher app is installed and running
+2. Verify Display Launcher is on port 9091
+3. Check camera names match exactly (case-sensitive)
+4. Ensure go2rtc server URL is configured in Stream Viewer web UI
+5. Test with ADB: `adb shell am start -n com.tpn.streamviewer/.MainActivity --es camera_name "CAMERA_NAME"`
+
+### "No server configured" error with intents
+1. Open Stream Viewer web interface
+2. Configure go2rtc server URL
+3. Click "Discover Cameras" to save configuration
+4. The URL is now persisted and will work with intents
 
 ### Tour not working
 1. Ensure at least one camera is enabled
@@ -499,6 +615,16 @@ cards:
 
 ### Connection errors
 1. Confirm Android device is on same network
-2. Check firewall rules allow port 9090
-3. Verify app is running on Android device
-4. Test endpoint with browser: `http://<DEVICE_IP>:9090`
+2. Check firewall rules allow port 9090 (Stream Viewer) and 9091 (Display Launcher)
+3. Verify apps are running on Android device
+4. Test endpoints with browser: `http://<DEVICE_IP>:9090` and `http://<DEVICE_IP>:9091`
+
+## Display Launcher Setup
+
+For intent-based launching, you need the Display Launcher companion app:
+
+1. Install Display Launcher APK on the same device
+2. Verify it's running (check `http://<DEVICE_IP>:9091`)
+3. No additional configuration needed - it automatically handles intents
+
+Display Launcher acts as an intent router, allowing Home Assistant to launch any Android app with custom intent extras.
