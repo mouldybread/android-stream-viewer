@@ -51,6 +51,49 @@ function loadPersistedLogs() {
     return '';
 }
 
+// go2rtc URL persistence functions
+function loadSavedGo2rtcUrl() {
+    const savedUrl = localStorage.getItem('go2rtcServerUrl');
+    const urlInput = document.getElementById('server-url');
+    const removeBtn = document.getElementById('removeGo2rtcUrlBtn');
+
+    if (savedUrl) {
+        serverUrl = savedUrl;
+        urlInput.value = savedUrl;
+        urlInput.disabled = true;
+        removeBtn.style.display = 'inline-block';
+    } else {
+        urlInput.disabled = false;
+        removeBtn.style.display = 'none';
+    }
+}
+
+function saveGo2rtcUrl(url) {
+    localStorage.setItem('go2rtcServerUrl', url);
+    serverUrl = url;
+
+    const urlInput = document.getElementById('server-url');
+    const removeBtn = document.getElementById('removeGo2rtcUrlBtn');
+
+    urlInput.value = url;
+    urlInput.disabled = true;
+    removeBtn.style.display = 'inline-block';
+}
+
+function removeGo2rtcUrl() {
+    localStorage.removeItem('go2rtcServerUrl');
+    serverUrl = '';
+
+    const urlInput = document.getElementById('server-url');
+    const removeBtn = document.getElementById('removeGo2rtcUrlBtn');
+
+    urlInput.value = '';
+    urlInput.disabled = false;
+    removeBtn.style.display = 'none';
+
+    updateStatus('✓ go2rtc server URL removed', 'success');
+}
+
 async function loadCameras() {
     try {
         const response = await fetch('/api/cameras');
@@ -59,11 +102,7 @@ async function loadCameras() {
         renderCameras();
 
         // Load saved go2rtc server URL
-        const savedUrl = localStorage.getItem('go2rtcServerUrl');
-        if (savedUrl) {
-            serverUrl = savedUrl;
-            document.getElementById('server-url').value = savedUrl;
-        }
+        loadSavedGo2rtcUrl();
 
         updateStatus('✓ Cameras loaded', 'success');
     } catch (error) {
@@ -172,7 +211,6 @@ async function discoverCameras() {
     }
 
     serverUrl = url;
-    localStorage.setItem('go2rtcServerUrl', url);
     document.getElementById('discover-status').textContent = '🔍 Discovering...';
     updateStatus('🔍 Discovering...', '');
 
@@ -214,6 +252,10 @@ async function discoverCameras() {
 
         await saveCameras();
         renderCameras();
+
+        // Save the go2rtc URL after successful discovery
+        saveGo2rtcUrl(url);
+
         document.getElementById('discover-status').textContent = `✓ Found ${streamNames.length} streams, added ${added} new`;
         updateStatus(`✓ Added ${added} cameras`, 'success');
     } catch (error) {
@@ -276,7 +318,7 @@ async function testCamera(id) {
             return;
         }
         serverUrl = url;
-        localStorage.setItem('go2rtcServerUrl', url);
+        saveGo2rtcUrl(url);
     }
 
     try {
@@ -333,7 +375,7 @@ async function startTour() {
             alert('⚠️ Please enter go2rtc server URL first');
             return;
         }
-        localStorage.setItem('go2rtcServerUrl', serverUrl);
+        saveGo2rtcUrl(serverUrl);
     }
 
     if (duration < 5 || duration > 600) {

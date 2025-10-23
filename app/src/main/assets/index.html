@@ -26,6 +26,12 @@
         }
         .form-group input:focus, .form-group select:focus { outline: none; border-color: #007bff; }
         .form-group input::placeholder { color: #666; }
+        .form-group input:disabled {
+            background: #333;
+            cursor: not-allowed;
+            opacity: 0.6;
+            color: #999;
+        }
         button {
             padding: 10px 20px;
             background: #007bff;
@@ -136,6 +142,18 @@
         }
         .inline-row { display: flex; gap: 10px; align-items: end; }
         .inline-row .form-group { flex: 1; margin-bottom: 0; }
+        .url-input-wrapper {
+            position: relative;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        .url-input-wrapper input { flex: 1; }
+        #removeGo2rtcUrlBtn {
+            flex-shrink: 0;
+            white-space: nowrap;
+            display: none;
+        }
         .header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; flex-wrap: wrap; gap: 10px; }
         .header-row h2 { margin: 0; }
         .info-badge {
@@ -171,7 +189,10 @@
         <div class="inline-row">
             <div class="form-group">
                 <label for="server-url">go2rtc Server URL</label>
-                <input type="text" id="server-url" placeholder="http://192.168.1.100:1984" value="">
+                <div class="url-input-wrapper">
+                    <input type="text" id="server-url" placeholder="http://192.168.1.100:1984" value="">
+                    <button id="removeGo2rtcUrlBtn" class="danger small" onclick="removeGo2rtcUrl()">Remove</button>
+                </div>
             </div>
             <button onclick="discoverCameras()">🔍 Discover</button>
         </div>
