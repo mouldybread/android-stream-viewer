@@ -789,11 +789,6 @@ class MainActivity : AppCompatActivity() {
 
                 val ipAddress = getLocalIpAddress()
                 Log.d(tag, "Server started on alternative port $port")
-                Toast.makeText(
-                    this,
-                    "Server: http://$ipAddress:$port",
-                    Toast.LENGTH_LONG
-                ).show()
 
                 return
 
