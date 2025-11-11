@@ -830,22 +830,22 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        try {
-            webView.onPause()
-            webView.pauseTimers()
-        } catch (e: Exception) {
-            Log.e(tag, "Error in onPause", e)
-        }
+        // try {
+        //     webView.onPause()
+        //     webView.pauseTimers()
+        // } catch (e: Exception) {
+        //     Log.e(tag, "Error in onPause", e)
+        // }
     }
 
     override fun onResume() {
         super.onResume()
-        try {
-            webView.onResume()
-            webView.resumeTimers()
-        } catch (e: Exception) {
-            Log.e(tag, "Error in onResume", e)
-        }
+        // try {
+        //     webView.onResume()
+        //     webView.resumeTimers()
+        // } catch (e: Exception) {
+        //     Log.e(tag, "Error in onResume", e)
+        // }
     }
 
     override fun onDestroy() {
@@ -854,6 +854,7 @@ class MainActivity : AppCompatActivity() {
             webServer?.stop()
             tourHandler.removeCallbacksAndMessages(null)
             burnInHandler.removeCallbacksAndMessages(null)
+            stopStreamHealthMonitoring()
         } catch (e: Exception) {
             Log.e(tag, "Error in onDestroy", e)
         }
