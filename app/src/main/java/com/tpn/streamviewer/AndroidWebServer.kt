@@ -28,7 +28,7 @@ class AndroidWebServer(
 ) : NanoHTTPD(port) {
 
     private val TAG = "AndroidWebServer"
-    private val logs = mutableListOf<String>()
+    private val logs = java.util.ArrayDeque<String>()
     private val maxLogs = 500
 
     var go2rtcServerUrl: String = ""
@@ -62,7 +62,7 @@ class AndroidWebServer(
         synchronized(logs) {
             logs.add(logEntry)
             if (logs.size > maxLogs) {
-                logs.removeAt(0)
+                logs.removeFirst()
             }
         }
         Log.d(TAG, message)

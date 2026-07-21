@@ -1,54 +1,37 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <title>Stream Player</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            background: #000;
-            overflow: hidden;
-        }
+        body { background: #000; overflow: hidden; }
         video {
             width: 100vw;
             height: 100vh;
             object-fit: cover;
             background: #000 !important;
         }
-
-        /* Remove all default video controls and poster images */
-        video::-webkit-media-controls {
-            display: none !important;
+        video::-webkit-media-controls { display: none !important; }
+        video::-webkit-media-controls-enclosure { display: none !important; }
+        video::poster { display: none !important; }
+        video::-webkit-media-controls-start-playback-button { display: none !important; }
+        #status {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px 15px;
+            border-radius: 5px;
+            font-size: 14px;
+            font-family: Arial, sans-serif;
+            z-index: 1000;
         }
-
-        video::-webkit-media-controls-enclosure {
-            display: none !important;
-        }
-
-        video::poster {
-            display: none !important;
-        }
-
-        video::-webkit-media-controls-start-playback-button {
-            display: none !important;
-        }
-
-                #status {
-                    position: fixed;
-                    top: 20px;
-                    left: 20px;
-                    background: rgba(0, 0, 0, 0.7);
-                    color: white;
-                    padding: 10px 15px;
-                    border-radius: 5px;
-                    font-size: 14px;
-                    font-family: Arial, sans-serif;
-                    z-index: 1000;
-                }
     </style>
 </head>
 <body>
-<video id="player" autoplay playsinline muted preload="auto" webkit-playsinline poster="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"></video>
-
+<video id="player" autoplay playsinline muted preload="auto" poster="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"></video>
 <div id="status">Connecting...</div>
 
 <script>
@@ -56,8 +39,10 @@
         try {
             const video = document.getElementById('player');
             const statusDiv = document.getElementById('status');
-            const streamUrl = '{{STREAM_URL}}';
-            const streamName = '{{STREAM_NAME}}';
+
+            // Mutable so switchStream() can update them in place without a page reload
+            let streamUrl = '{{STREAM_URL}}';
+            let streamName = '{{STREAM_NAME}}';
             const forceWebRTC = {{FORCE_WEBRTC}};
             const forceMSE = {{FORCE_MSE}};
 
@@ -71,9 +56,11 @@
             let reconnectTimeout = null;
             let reconnectAttempts = 0;
             let videoPlaying = false;
+            let frameCheckInterval = null;
+            let decodeRetryTimeout = null;
+            let decodeErrorCount = 0;
             const maxReconnectAttempts = 5;
 
-            // FIX 4: Additional video element properties for Fire OS
             video.controls = false;
             video.defaultMuted = true;
             video.muted = true;
@@ -81,7 +68,10 @@
 
             function updateStatus(msg) {
                 try {
-                    if (statusDiv) statusDiv.textContent = msg;
+                    if (statusDiv) {
+                        statusDiv.textContent = msg;
+                        statusDiv.style.display = '';
+                    }
                     console.log('[STATUS] ' + msg);
                 } catch (e) {
                     console.error('Status error:', e);
@@ -92,7 +82,6 @@
                 console.log('[STREAM] ' + msg);
             }
 
-            // FIX 2: Force H.264 Constrained Baseline Profile for Amazon compatibility
             function forceH264Baseline(sdp) {
                 log('Applying H.264 Constrained Baseline filter to SDP');
                 let lines = sdp.split('\r\n');
@@ -100,17 +89,13 @@
                 let removedProfiles = 0;
 
                 for (let line of lines) {
-                    // Check for H.264 profile specifications
                     if (line.includes('a=fmtp') && line.includes('profile-level-id')) {
-                        // 42e0 = Constrained Baseline (required by Amazon)
-                        // 4d40 = Main profile (not supported)
-                        // 6400 = High profile (not supported)
                         if (line.includes('profile-level-id=42e0') || line.includes('profile-level-id=42E0')) {
                             filteredLines.push(line);
-                            log('âœ“ Keeping H.264 Constrained Baseline: ' + line.substring(0, 60) + '...');
+                            log('Keeping H.264 Constrained Baseline: ' + line.substring(0, 60) + '...');
                         } else {
                             removedProfiles++;
-                            log('âœ— Removing non-baseline profile: ' + line.substring(0, 60) + '...');
+                            log('Removing non-baseline profile: ' + line.substring(0, 60) + '...');
                         }
                     } else {
                         filteredLines.push(line);
@@ -121,7 +106,6 @@
                 return filteredLines.join('\r\n');
             }
 
-            // FIX 5: Prevent Fire OS from pausing video when page is "hidden"
             document.addEventListener('visibilitychange', () => {
                 if (document.hidden && video.paused && videoPlaying) {
                     log('Page hidden - forcing video to continue playing');
@@ -130,6 +114,9 @@
             });
 
             video.addEventListener('pause', () => {
+                if (mode !== 'webrtc') {
+                    videoPlaying = false;
+                }
                 if (videoPlaying && mode === 'webrtc') {
                     log('Video paused unexpectedly - attempting to resume');
                     setTimeout(() => {
@@ -139,96 +126,84 @@
             });
 
             function cleanup() {
-    log('Cleaning up connections...');
-    try {
-        if (webrtcTimeout) {
-            clearTimeout(webrtcTimeout);
-            webrtcTimeout = null;
-        }
+                log('Cleaning up connections...');
+                try {
+                    videoPlaying = false;
 
-        if (reconnectTimeout) {
-            clearTimeout(reconnectTimeout);
-            reconnectTimeout = null;
-        }
+                    if (webrtcTimeout) { clearTimeout(webrtcTimeout); webrtcTimeout = null; }
+                    if (reconnectTimeout) { clearTimeout(reconnectTimeout); reconnectTimeout = null; }
+                    if (decodeRetryTimeout) { clearTimeout(decodeRetryTimeout); decodeRetryTimeout = null; }
 
-        // Clean up WebSocket
-        if (websocket) {
-            try {
-                websocket.onopen = null;
-                websocket.onmessage = null;
-                websocket.onerror = null;
-                websocket.onclose = null;
-                if (websocket.readyState === WebSocket.OPEN ||
-                    websocket.readyState === WebSocket.CONNECTING) {
-                    websocket.close();
+                    if (websocket) {
+                        try {
+                            websocket.onopen = null;
+                            websocket.onmessage = null;
+                            websocket.onerror = null;
+                            websocket.onclose = null;
+                            if (websocket.readyState === WebSocket.OPEN ||
+                                websocket.readyState === WebSocket.CONNECTING) {
+                                websocket.close();
+                            }
+                        } catch (e) {
+                            log('WebSocket cleanup error: ' + e.message);
+                        }
+                        websocket = null;
+                    }
+
+                    if (pc) {
+                        pc.ontrack = null;
+                        pc.oniceconnectionstatechange = null;
+                        pc.onicecandidate = null;
+                        pc.close();
+                        pc = null;
+                    }
+
+                    if (sourceBuffer) {
+                        try {
+                            if (!sourceBuffer.updating) sourceBuffer.abort();
+                        } catch (e) {
+                            log('SourceBuffer cleanup error: ' + e.message);
+                        }
+                        sourceBuffer = null;
+                    }
+
+                    if (mediaSource && mediaSource.readyState === 'open') {
+                        try { mediaSource.endOfStream(); } catch (e) {
+                            log('MediaSource cleanup error: ' + e.message);
+                        }
+                    }
+                    mediaSource = null;
+
+                    if (video.srcObject) {
+                        try {
+                            const tracks = video.srcObject.getTracks();
+                            tracks.forEach(track => {
+                                track.stop();
+                                log('Stopped track: ' + track.kind);
+                            });
+                        } catch (e) {
+                            log('Track stop error: ' + e.message);
+                        }
+                        video.srcObject = null;
+                    }
+
+                    video.src = '';
+                    video.load();
+                    video.removeAttribute('src');
+
+                    queue = [];
+                    mode = null;
+                } catch (e) {
+                    log('Cleanup error: ' + e.message);
                 }
-            } catch (e) {
-                log('WebSocket cleanup error: ' + e.message);
             }
-            websocket = null;
-        }
-
-        // Clean up RTCPeerConnection
-        if (pc) {
-            pc.ontrack = null;
-            pc.oniceconnectionstatechange = null;
-            pc.onicecandidate = null;
-            pc.close();
-            pc = null;
-        }
-
-        // Clean up SourceBuffer
-        if (sourceBuffer) {
-            try {
-                if (!sourceBuffer.updating) {
-                    sourceBuffer.abort();
-                }
-            } catch (e) {
-                log('SourceBuffer cleanup error: ' + e.message);
-            }
-            sourceBuffer = null;
-        }
-
-        // Clean up MediaSource
-        if (mediaSource && mediaSource.readyState === 'open') {
-            try {
-                mediaSource.endOfStream();
-            } catch (e) {
-                log('MediaSource cleanup error: ' + e.message);
-            }
-        }
-        mediaSource = null;
-
-        // CRITICAL FIX: Properly stop all video tracks
-        if (video.srcObject) {
-            try {
-                const tracks = video.srcObject.getTracks();
-                tracks.forEach(track => {
-                    track.stop();
-                    log('Stopped track: ' + track.kind);
-                });
-            } catch (e) {
-                log('Track stop error: ' + e.message);
-            }
-            video.srcObject = null;
-        }
-
-        // Clear video element completely
-        video.src = '';
-        video.load();
-        video.removeAttribute('src');
-
-        queue = [];
-        mode = null;
-    } catch (e) {
-        log('Cleanup error: ' + e.message);
-    }
-}
-
 
             async function startStream() {
                 try {
                     cleanup();
+                    // Small delay lets the previous decoder/surface fully release before
+                    // a new codec instance is allocated - avoids Amlogic C2 start timeout races
+                    await new Promise(resolve => setTimeout(resolve, 300));
 
                     log('=== Starting Stream ===');
                     log('Protocol: ' + (forceWebRTC ? 'WebRTC only' : forceMSE ? 'MSE only' : 'Auto'));
@@ -253,7 +228,6 @@
 
                             updateStatus('Negotiating WebRTC...');
 
-                            // CRITICAL: No STUN servers for Fire TV compatibility
                             pc = new RTCPeerConnection({
                                 iceServers: [],
                                 bundlePolicy: 'max-bundle',
@@ -268,78 +242,38 @@
                                 try {
                                     trackCount++;
                                     log('WebRTC track received: ' + event.track.kind + ' (track #' + trackCount + ')');
-                                    log('Track readyState: ' + event.track.readyState);
-                                    log('Stream ID: ' + event.streams[0].id);
-                                    log('Stream active: ' + event.streams[0].active);
 
                                     if (trackCount === 1) {
                                         mode = 'webrtc';
-                                        if (webrtcTimeout) {
-                                            clearTimeout(webrtcTimeout);
-                                            webrtcTimeout = null;
-                                        }
+                                        if (webrtcTimeout) { clearTimeout(webrtcTimeout); webrtcTimeout = null; }
 
                                         video.srcObject = event.streams[0];
                                         log('Video srcObject set');
-                                        log('Video element readyState: ' + video.readyState);
-                                        log('Video networkState: ' + video.networkState);
-
-                                        // Add event listeners for debugging
-                                        video.addEventListener('loadstart', () => log('VIDEO EVENT: loadstart'));
-                                        video.addEventListener('loadedmetadata', () => log('VIDEO EVENT: loadedmetadata - duration: ' + video.duration));
-                                        video.addEventListener('loadeddata', () => log('VIDEO EVENT: loadeddata'));
-                                        video.addEventListener('canplay', () => log('VIDEO EVENT: canplay'));
-                                        video.addEventListener('canplaythrough', () => log('VIDEO EVENT: canplaythrough'));
-                                        video.addEventListener('playing', () => log('VIDEO EVENT: playing'));
-                                        video.addEventListener('waiting', () => log('VIDEO EVENT: waiting'));
-                                        video.addEventListener('stalled', () => log('VIDEO EVENT: stalled'));
-                                        video.addEventListener('suspend', () => log('VIDEO EVENT: suspend'));
-                                        video.addEventListener('error', (e) => {
-                                            log('VIDEO ERROR EVENT: ' + (e.message || 'unknown'));
-                                            if (video.error) {
-                                                log('Video error code: ' + video.error.code);
-                                                log('Video error message: ' + video.error.message);
-                                            }
-                                        });
 
                                         setTimeout(() => {
                                             if (video.srcObject) {
-                                                log('Attempting to play... readyState=' + video.readyState + ' networkState=' + video.networkState);
-
                                                 video.play().then(() => {
-                                                    log('âœ“âœ“âœ“ Playing via WebRTC SUCCESS âœ“âœ“âœ“');
+                                                    log('Playing via WebRTC SUCCESS');
                                                     updateStatus('Playing: ' + streamName);
                                                     videoPlaying = true;
-
                                                     setTimeout(() => {
-                                                        if (statusDiv && videoPlaying) {
-                                                            statusDiv.style.display = 'none';
-                                                        }
+                                                        if (statusDiv && videoPlaying) statusDiv.style.display = 'none';
                                                     }, 3000);
                                                 }).catch(e => {
-                                                    log('âœ—âœ—âœ— Play error: ' + e.message);
-                                                    log('Error name: ' + e.name);
-                                                    log('Error toString: ' + e.toString());
-                                                    log('Video paused: ' + video.paused);
-                                                    log('Video readyState: ' + video.readyState);
-                                                    log('Video networkState: ' + video.networkState);
+                                                    log('Play error: ' + e.message);
                                                     updateStatus('Play error: ' + e.message);
-
-                                                    // Try forcing play again
                                                     setTimeout(() => {
-                                                        log('Retry attempt...');
                                                         video.play().catch(e2 => log('Retry failed: ' + e2.message));
                                                     }, 1000);
                                                 });
                                             } else {
-                                                log('âœ—âœ—âœ— ERROR: srcObject is null!');
+                                                log('ERROR: srcObject is null!');
                                                 updateStatus('Error: No video source');
                                             }
                                         }, 100);
                                     }
                                 } catch (e) {
-                                    log('âœ—âœ—âœ— ontrack error: ' + e.message);
-                                    log('Stack: ' + (e.stack || 'no stack'));
+                                    log('ontrack error: ' + e.message);
                                 }
                             };
 
@@ -352,9 +286,7 @@
                                         log('ICE connected successfully');
                                     } else if (state === 'failed') {
                                         log('ICE FAILED - triggering fallback');
-                                        if (!mode && !forceWebRTC) {
-                                            fallbackToMSE();
-                                        }
+                                        if (!mode && !forceWebRTC) fallbackToMSE();
                                     } else if (state === 'disconnected') {
                                         log('ICE disconnected');
                                         if (!forceWebRTC && mode === 'webrtc') {
@@ -371,15 +303,11 @@
                                 }
                             };
 
-                            // FIX 1: DISABLE TRICKLE ICE for Amazon Fire OS compatibility
-                            // Amazon devices don't support Trickle ICE - must send complete offer with all candidates
                             pc.onicecandidate = (event) => {
                                 if (event.candidate) {
-                                    log('ICE candidate discovered: ' + event.candidate.candidate.substring(0, 50) + '...');
-                                    // DO NOT SEND YET - wait for gathering to complete
+                                    log('ICE candidate discovered');
                                 } else {
-                                    log('âœ“ ICE gathering complete - sending full offer with all candidates');
-                                    // NOW send the complete offer with all embedded candidates
+                                    log('ICE gathering complete - sending full offer with all candidates');
                                     if (websocket && websocket.readyState === WebSocket.OPEN) {
                                         websocket.send(JSON.stringify({
                                             type: 'webrtc/offer',
@@ -387,7 +315,7 @@
                                         }));
                                         log('Complete WebRTC offer sent (non-trickle mode)');
                                     } else {
-                                        log('âœ— WebSocket not ready to send offer');
+                                        log('WebSocket not ready to send offer');
                                     }
                                 }
                             };
@@ -398,15 +326,10 @@
 
                             const offer = await pc.createOffer();
                             log('Offer created, applying H.264 baseline filter...');
-
-                            // FIX 2: Force H.264 Constrained Baseline
                             offer.sdp = forceH264Baseline(offer.sdp);
 
                             await pc.setLocalDescription(offer);
                             log('Local description set, waiting for ICE gathering...');
-
-                            // FIX 1: DON'T send offer here - wait for onicecandidate(null)
-                            // The offer will be sent when ICE gathering completes
 
                             if (!forceWebRTC) {
                                 webrtcTimeout = setTimeout(() => {
@@ -414,14 +337,12 @@
                                         log('WebRTC timeout (10s), trying MSE');
                                         fallbackToMSE();
                                     }
-                                }, 10000); // Increased from 5s to 10s for slower ICE gathering
+                                }, 10000);
                             }
                         } catch (e) {
                             log('WebRTC setup error: ' + e.message);
                             updateStatus('Setup error');
-                            if (!forceWebRTC) {
-                                fallbackToMSE();
-                            }
+                            if (!forceWebRTC) fallbackToMSE();
                         }
                     };
 
@@ -432,19 +353,11 @@
 
                                 if (msg.type === 'webrtc/answer' && pc) {
                                     log('WebRTC answer received');
-                                    if (webrtcTimeout) {
-                                        clearTimeout(webrtcTimeout);
-                                        webrtcTimeout = null;
-                                    }
-                                    await pc.setRemoteDescription({
-                                        type: 'answer',
-                                        sdp: msg.value
-                                    });
+                                    if (webrtcTimeout) { clearTimeout(webrtcTimeout); webrtcTimeout = null; }
+                                    await pc.setRemoteDescription({ type: 'answer', sdp: msg.value });
                                     log('Remote description set');
 
                                 } else if (msg.type === 'webrtc/candidate' && pc) {
-                                    // FIX 1: Server is sending Trickle ICE candidates, but we ignore them
-                                    // Our offer already contains all candidates (non-trickle mode)
                                     log('Ignoring trickle ICE candidate from server (using embedded candidates)');
 
                                 } else if (msg.type === 'mse') {
@@ -458,9 +371,7 @@
 
                                         sourceBuffer.addEventListener('updateend', () => {
                                             if (queue.length > 0 && !sourceBuffer.updating) {
-                                                try {
-                                                    sourceBuffer.appendBuffer(queue.shift());
-                                                } catch (e) {
+                                                try { sourceBuffer.appendBuffer(queue.shift()); } catch (e) {
                                                     log('Buffer append error: ' + e.message);
                                                 }
                                             }
@@ -473,6 +384,7 @@
                                         video.play().then(() => {
                                             log('Playing via MSE SUCCESS');
                                             updateStatus('Playing: ' + streamName);
+                                            videoPlaying = true;
                                             setTimeout(() => {
                                                 if (statusDiv) statusDiv.style.display = 'none';
                                             }, 3000);
@@ -537,107 +449,6 @@
                             setTimeout(() => {
                                 reconnectAttempts = 0;
                                 startStream();
-
-            // === HEALTH MONITORING ADDITIONS ===
-
-            // Video element event listeners for health monitoring
-            video.addEventListener('playing', () => {
-                log('Video is playing');
-                updateStatus('Playing');
-                if (window.AndroidInterface) {
-                    try {
-                        window.AndroidInterface.onStreamPlaying();
-                    } catch (e) {
-                        console.error('Failed to send playing event:', e);
-                    }
-                }
-            });
-
-            video.addEventListener('pause', () => {
-                log('Video paused');
-            });
-
-            video.addEventListener('stalled', () => {
-                log('Video stalled', true);
-                if (window.AndroidInterface) {
-                    try {
-                        window.AndroidInterface.onStreamError('Video stalled');
-                    } catch (e) {
-                        console.error('Failed to report stall:', e);
-                    }
-                }
-            });
-
-            video.addEventListener('waiting', () => {
-                log('Video buffering...');
-            });
-
-            video.addEventListener('error', (e) => {
-                const error = video.error;
-                let errorMsg = 'Video error';
-                if (error) {
-                    errorMsg += ': ' + error.code + ' - ' + error.message;
-                }
-                log(errorMsg, true);
-                updateStatus('Video error', true);
-
-                if (window.AndroidInterface) {
-                    try {
-                        window.AndroidInterface.onStreamError(errorMsg);
-                    } catch (err) {
-                        console.error('Failed to report video error:', err);
-                    }
-                }
-            });
-
-            video.addEventListener('loadeddata', () => {
-                log('Video data loaded');
-            });
-
-            video.addEventListener('canplay', () => {
-                log('Video can play');
-            });
-
-            // Heartbeat to Android every 5 seconds
-            setInterval(() => {
-                if (window.AndroidInterface) {
-                    try {
-                        window.AndroidInterface.onStreamPlaying();
-                    } catch (e) {
-                        console.error('Failed to send heartbeat:', e);
-                    }
-                }
-            }, 5000);
-
-            // Monitor video frame updates
-            let lastFrameTime = Date.now();
-            let frameCheckInterval = setInterval(() => {
-                if (video.readyState >= 2) { // HAVE_CURRENT_DATA or better
-                    const now = Date.now();
-                    const timeSinceLastFrame = now - lastFrameTime;
-
-                    if (timeSinceLastFrame > 15000) { // 15 seconds without frames
-                        log('No video frames for ' + (timeSinceLastFrame/1000) + 's', true);
-                        if (window.AndroidInterface) {
-                            try {
-                                window.AndroidInterface.onStreamError('No frames for ' + (timeSinceLastFrame/1000) + 's');
-                            } catch (e) {
-                                console.error('Failed to report frame timeout:', e);
-                            }
-                        }
-                    }
-                    lastFrameTime = now;
-                }
-            }, 10000); // Check every 10 seconds
-
-            // Cleanup on page unload
-            window.addEventListener('beforeunload', () => {
-                clearInterval(frameCheckInterval);
-                cleanup();
-            });
-
-            // === END HEALTH MONITORING ===
-
                             }, 60000);
                         }
                     };
@@ -663,15 +474,8 @@
                     log('Switching to MSE fallback');
                     updateStatus('Trying MSE...');
 
-                    if (pc) {
-                        pc.close();
-                        pc = null;
-                    }
-
-                    if (webrtcTimeout) {
-                        clearTimeout(webrtcTimeout);
-                        webrtcTimeout = null;
-                    }
+                    if (pc) { pc.close(); pc = null; }
+                    if (webrtcTimeout) { clearTimeout(webrtcTimeout); webrtcTimeout = null; }
 
                     mediaSource = new MediaSource();
                     video.src = URL.createObjectURL(mediaSource);
@@ -703,11 +507,120 @@
                 }
             }
 
-            // Start the stream
+            // === Exposed to native side for in-place stream switching ===
+            // Native calls: webView.evaluateJavascript("switchStream('url','name')")
+            // This avoids a full WebView page reload, which was racing the Amlogic
+            // decoder's teardown/allocation and causing intermittent start timeouts.
+            window.switchStream = function(newUrl, newName) {
+                try {
+                    log('In-place stream switch requested: ' + newName);
+                    streamUrl = newUrl;
+                    streamName = newName;
+                    decodeErrorCount = 0;
+                    cleanup();
+                    setTimeout(() => { startStream(); }, 100);
+                    return true;
+                } catch (e) {
+                    log('switchStream error: ' + e.message);
+                    return false;
+                }
+            };
+
+            // === HEALTH MONITORING (registered once, top-level) ===
+            video.addEventListener('playing', () => {
+                log('Video is playing');
+                updateStatus('Playing');
+                videoPlaying = true;
+                decodeErrorCount = 0;
+                if (window.AndroidInterface) {
+                    try { window.AndroidInterface.onStreamPlaying(); } catch (e) {
+                        console.error('Failed to send playing event:', e);
+                    }
+                }
+            });
+
+            video.addEventListener('stalled', () => {
+                log('Video stalled');
+                if (window.AndroidInterface) {
+                    try { window.AndroidInterface.onStreamError('Video stalled'); } catch (e) {
+                        console.error('Failed to report stall:', e);
+                    }
+                }
+            });
+
+            video.addEventListener('waiting', () => {
+                log('Video buffering...');
+            });
+
+            video.addEventListener('error', (e) => {
+                const error = video.error;
+                let errorMsg = 'Video error';
+                if (error) errorMsg += ': ' + error.code + ' - ' + error.message;
+                log(errorMsg);
+                updateStatus('Video error');
+                videoPlaying = false;
+
+                if (window.AndroidInterface) {
+                    try { window.AndroidInterface.onStreamError(errorMsg); } catch (err) {
+                        console.error('Failed to report video error:', err);
+                    }
+                }
+
+                if (decodeRetryTimeout) clearTimeout(decodeRetryTimeout);
+                decodeErrorCount++;
+                const retryDelay = Math.min(2000 * decodeErrorCount, 8000);
+                log('Retrying stream in ' + (retryDelay / 1000) + 's after video error (attempt ' + decodeErrorCount + ')...');
+                decodeRetryTimeout = setTimeout(() => { startStream(); }, retryDelay);
+            });
+
+            video.addEventListener('loadeddata', () => {
+                log('Video data loaded');
+            });
+
+            video.addEventListener('canplay', () => {
+                log('Video can play');
+            });
+
+            setInterval(() => {
+                if (window.AndroidInterface && videoPlaying && !video.paused && !video.ended) {
+                    try { window.AndroidInterface.onStreamPlaying(); } catch (e) {
+                        console.error('Failed to send heartbeat:', e);
+                    }
+                }
+            }, 5000);
+
+            let lastFrameTime = Date.now();
+            frameCheckInterval = setInterval(() => {
+                if (video.readyState >= 2 && videoPlaying) {
+                    const now = Date.now();
+                    const timeSinceLastFrame = now - lastFrameTime;
+
+                    if (timeSinceLastFrame > 15000) {
+                        log('No video frames for ' + (timeSinceLastFrame / 1000) + 's');
+                        if (window.AndroidInterface) {
+                            try {
+                                window.AndroidInterface.onStreamError('No frames for ' + (timeSinceLastFrame / 1000) + 's');
+                            } catch (e) {
+                                console.error('Failed to report frame timeout:', e);
+                            }
+                        }
+                    }
+                    lastFrameTime = now;
+                }
+            }, 10000);
+
+            window.addEventListener('beforeunload', () => {
+                if (frameCheckInterval) clearInterval(frameCheckInterval);
+                if (decodeRetryTimeout) clearTimeout(decodeRetryTimeout);
+                cleanup();
+            });
+            // === END HEALTH MONITORING ===
+
             log('=== Stream Viewer Initialized ===');
             log('Fire OS / Amazon WebView Optimizations: ENABLED');
             log('Trickle ICE: DISABLED (Amazon compatibility)');
             log('H.264 Profile Filter: ENABLED (Constrained Baseline only)');
+            log('switchStream() exposed for in-place switching: ENABLED');
             startStream();
 
         } catch (error) {

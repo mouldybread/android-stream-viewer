@@ -17,22 +17,35 @@ let lastLogContent = '';
 })();
 
 // Persistent logging
+let logBatchBuffer = [];
+let saveLogTimeout = null;
+
 function saveLogToStorage(log) {
     try {
         const hash = log.substring(0, 60);
         if (savedLogHashes.has(hash)) return;
-
         savedLogHashes.add(hash);
 
-        let persistentLogs = JSON.parse(localStorage.getItem('streamViewerLogs') || '[]');
-        persistentLogs.push({
-            timestamp: new Date().toISOString(),
-            message: log
-        });
-        if (persistentLogs.length > 500) {
-            persistentLogs = persistentLogs.slice(-500);
+        logBatchBuffer.push({ timestamp: new Date().toISOString(), message: log });
+
+        if (!saveLogTimeout) {
+            saveLogTimeout = setTimeout(() => {
+                try {
+                    let persistentLogs = JSON.parse(localStorage.getItem('streamViewerLogs') || '[]');
+                    persistentLogs = persistentLogs.concat(logBatchBuffer);
+
+                    if (persistentLogs.length > 500) {
+                        persistentLogs = persistentLogs.slice(-500);
+                    }
+
+                    localStorage.setItem('streamViewerLogs', JSON.stringify(persistentLogs));
+                    logBatchBuffer = [];
+                    saveLogTimeout = null;
+                } catch (e) {
+                    console.error('Failed to batch save logs:', e);
+                }
+            }, 2000); // Flush every 2 seconds
         }
-        localStorage.setItem('streamViewerLogs', JSON.stringify(persistentLogs));
     } catch (e) {
         console.error('Failed to save log:', e);
     }
