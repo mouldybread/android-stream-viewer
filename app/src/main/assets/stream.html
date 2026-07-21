@@ -518,7 +518,7 @@
                     streamName = newName;
                     decodeErrorCount = 0;
                     cleanup();
-                    setTimeout(() => { startStream(); }, 100);
+                    setTimeout(() => { startStream(); }, 500);
                     return true;
                 } catch (e) {
                     log('switchStream error: ' + e.message);
