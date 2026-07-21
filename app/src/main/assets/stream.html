@@ -107,10 +107,10 @@
                         // 6400 = High profile (not supported)
                         if (line.includes('profile-level-id=42e0') || line.includes('profile-level-id=42E0')) {
                             filteredLines.push(line);
-                            log('✓ Keeping H.264 Constrained Baseline: ' + line.substring(0, 60) + '...');
+                            log('âœ“ Keeping H.264 Constrained Baseline: ' + line.substring(0, 60) + '...');
                         } else {
                             removedProfiles++;
-                            log('✗ Removing non-baseline profile: ' + line.substring(0, 60) + '...');
+                            log('âœ— Removing non-baseline profile: ' + line.substring(0, 60) + '...');
                         }
                     } else {
                         filteredLines.push(line);
@@ -307,7 +307,7 @@
                                                 log('Attempting to play... readyState=' + video.readyState + ' networkState=' + video.networkState);
 
                                                 video.play().then(() => {
-                                                    log('✓✓✓ Playing via WebRTC SUCCESS ✓✓✓');
+                                                    log('âœ“âœ“âœ“ Playing via WebRTC SUCCESS âœ“âœ“âœ“');
                                                     updateStatus('Playing: ' + streamName);
                                                     videoPlaying = true;
 
@@ -317,7 +317,7 @@
                                                         }
                                                     }, 3000);
                                                 }).catch(e => {
-                                                    log('✗✗✗ Play error: ' + e.message);
+                                                    log('âœ—âœ—âœ— Play error: ' + e.message);
                                                     log('Error name: ' + e.name);
                                                     log('Error toString: ' + e.toString());
                                                     log('Video paused: ' + video.paused);
@@ -332,13 +332,13 @@
                                                     }, 1000);
                                                 });
                                             } else {
-                                                log('✗✗✗ ERROR: srcObject is null!');
+                                                log('âœ—âœ—âœ— ERROR: srcObject is null!');
                                                 updateStatus('Error: No video source');
                                             }
                                         }, 100);
                                     }
                                 } catch (e) {
-                                    log('✗✗✗ ontrack error: ' + e.message);
+                                    log('âœ—âœ—âœ— ontrack error: ' + e.message);
                                     log('Stack: ' + (e.stack || 'no stack'));
                                 }
                             };
@@ -378,7 +378,7 @@
                                     log('ICE candidate discovered: ' + event.candidate.candidate.substring(0, 50) + '...');
                                     // DO NOT SEND YET - wait for gathering to complete
                                 } else {
-                                    log('✓ ICE gathering complete - sending full offer with all candidates');
+                                    log('âœ“ ICE gathering complete - sending full offer with all candidates');
                                     // NOW send the complete offer with all embedded candidates
                                     if (websocket && websocket.readyState === WebSocket.OPEN) {
                                         websocket.send(JSON.stringify({
@@ -387,7 +387,7 @@
                                         }));
                                         log('Complete WebRTC offer sent (non-trickle mode)');
                                     } else {
-                                        log('✗ WebSocket not ready to send offer');
+                                        log('âœ— WebSocket not ready to send offer');
                                     }
                                 }
                             };

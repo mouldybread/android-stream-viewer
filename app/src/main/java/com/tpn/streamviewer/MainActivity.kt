@@ -1,17 +1,19 @@
 package com.tpn.streamviewer
 
 import android.annotation.SuppressLint
-import android.content.Context
 import android.content.Intent
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Base64
 import android.util.Log
 import android.view.View
 import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.webkit.ConsoleMessage
+import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -26,6 +28,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.BindException
+import java.net.Inet4Address
+import java.net.NetworkInterface
 
 class MainActivity : AppCompatActivity() {
 
@@ -39,23 +43,24 @@ class MainActivity : AppCompatActivity() {
     private var currentStreamName = ""
     private var currentProtocol = "auto"
 
+    private var playerShellLoaded = false
+    private var pendingSwitch: Triple<String, String, String>? = null
+
     private var tourActive = false
     private var tourCameras = listOf<CameraConfig>()
     private var tourDuration = 60
     private var tourCurrentIndex = 0
     private val tourHandler = Handler(Looper.getMainLooper())
 
-    // Burn-in protection
     private var burnInProtectionEnabled = true
     private val burnInHandler = Handler(Looper.getMainLooper())
     private var burnInBlankActive = false
-    private val BURN_IN_INTERVAL = 2 * 60 * 60 * 1000L  // 2 hours in milliseconds
-    private val BURN_IN_DURATION = 60 * 1000L  // 1 minute in milliseconds
+    private val burnInIntervalMs = 2 * 60 * 60 * 1000L
+    private val burnInDurationMs = 60 * 1000L
 
-    // Stream health monitoring
     private val streamHealthHandler = Handler(Looper.getMainLooper())
     private var lastStreamActivity = System.currentTimeMillis()
-    private val STREAM_TIMEOUT = 30 * 1000L
+    private val streamTimeoutMs = 30 * 1000L
     private var streamHealthCheckActive = false
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -71,20 +76,16 @@ class MainActivity : AppCompatActivity() {
             setContentView(R.layout.activity_main)
 
             webView = findViewById(R.id.webView)
+            webView.setBackgroundColor(Color.BLACK)
 
-            // Set background to black immediately
-            webView.setBackgroundColor(android.graphics.Color.BLACK)
-
-            // Check if this is first run
-            val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+            val prefs = getSharedPreferences("app_prefs", MODE_PRIVATE)
             val isFirstRun = !prefs.getBoolean("initialized", false)
 
             if (isFirstRun) {
                 Log.d(tag, "First run detected - initializing WebView")
-                // Pre-initialize WebView on first run (API 28+)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                     try {
-                        WebView.setDataDirectorySuffix("streamviewer")
+                        WebView.setDataDirectorySuffix("stream_viewer")
                         Log.d(tag, "WebView data directory suffix set")
                     } catch (e: Exception) {
                         Log.e(tag, "Error setting WebView data directory", e)
@@ -92,7 +93,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // Configure WebView settings
             try {
                 webView.settings.apply {
                     javaScriptEnabled = true
@@ -100,7 +100,7 @@ class MainActivity : AppCompatActivity() {
                     @Suppress("DEPRECATION")
                     databaseEnabled = true
                     mediaPlaybackRequiresUserGesture = false
-                    cacheMode = WebSettings.LOAD_NO_CACHE
+                    cacheMode = WebSettings.LOAD_DEFAULT
                     mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                     allowFileAccess = false
                     allowContentAccess = false
@@ -108,8 +108,6 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
-
-                // Enable WebView debugging
                 WebView.setWebContentsDebuggingEnabled(true)
 
                 Log.d(tag, "WebView settings configured")
@@ -121,6 +119,11 @@ class MainActivity : AppCompatActivity() {
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
                     Log.d(tag, "Page loaded: $url")
+
+                    pendingSwitch?.let { (go2rtcUrl, streamName, protocol) ->
+                        pendingSwitch = null
+                        dispatchSwitchToWebView(go2rtcUrl, streamName, protocol)
+                    }
                 }
 
                 @Suppress("OVERRIDE_DEPRECATION")
@@ -132,6 +135,7 @@ class MainActivity : AppCompatActivity() {
                 ) {
                     Log.e(tag, "WebView error: $description (code: $errorCode) at $failingUrl")
                     webServer?.addLog("WebView error: $description")
+                    playerShellLoaded = false
 
                     if (currentStreamName.isNotEmpty() && currentGo2rtcUrl.isNotEmpty()) {
                         Handler(Looper.getMainLooper()).postDelayed({
@@ -146,13 +150,11 @@ class MainActivity : AppCompatActivity() {
                 override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
                     try {
                         val logMsg = "[${consoleMessage.sourceId()}:${consoleMessage.lineNumber()}] ${consoleMessage.message()}"
-
                         when (consoleMessage.messageLevel()) {
                             ConsoleMessage.MessageLevel.ERROR -> Log.e(tag, "JS: $logMsg")
                             ConsoleMessage.MessageLevel.WARNING -> Log.w(tag, "JS: $logMsg")
                             else -> Log.d(tag, "JS: $logMsg")
                         }
-
                         webServer?.addLog(logMsg)
                     } catch (e: Exception) {
                         Log.e(tag, "Error logging console message", e)
@@ -161,11 +163,9 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-
-            // JavaScript interface to monitor stream health
             webView.addJavascriptInterface(object {
                 @Suppress("unused")
-                @android.webkit.JavascriptInterface
+                @JavascriptInterface
                 fun onStreamPlaying() {
                     runOnUiThread {
                         lastStreamActivity = System.currentTimeMillis()
@@ -174,7 +174,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 @Suppress("unused")
-                @android.webkit.JavascriptInterface
+                @JavascriptInterface
                 fun onStreamError(message: String) {
                     runOnUiThread {
                         Log.e(tag, "Stream error from JS: $message")
@@ -184,10 +184,8 @@ class MainActivity : AppCompatActivity() {
                 }
             }, "AndroidInterface")
 
-            // Start web server first
             startWebServer()
 
-            // Longer delay on first run for WebView initialization
             val delay = if (isFirstRun) 2000L else 1000L
 
             Handler(Looper.getMainLooper()).postDelayed({
@@ -195,7 +193,6 @@ class MainActivity : AppCompatActivity() {
                     Log.d(tag, "Loading placeholder screen...")
                     showPlaceholder()
 
-                    // Mark as initialized after successful first load
                     if (isFirstRun) {
                         prefs.edit { putBoolean("initialized", true) }
                         Log.d(tag, "First run initialization complete")
@@ -205,12 +202,10 @@ class MainActivity : AppCompatActivity() {
                 }
             }, delay)
 
-            // Start burn-in protection after everything is initialized
             Handler(Looper.getMainLooper()).postDelayed({
                 startBurnInProtection()
             }, 5000)
 
-            // Handle intent after everything is initialized
             Handler(Looper.getMainLooper()).postDelayed({
                 handleIntent(intent)
             }, 3000)
@@ -229,13 +224,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun handleIntent(intent: Intent?) {
         intent?.let {
-            // Check for camera name extra
             val cameraName = it.getStringExtra("camera_name")
             if (cameraName != null) {
                 Log.d(tag, "Intent received with camera_name: $cameraName")
                 webServer?.addLog("Intent: Loading camera '$cameraName'")
 
-                // Load the camera list and find matching camera
                 val cameras = loadCameras()
                 val camera = cameras.find { cam ->
                     cam.name.equals(cameraName, ignoreCase = true) ||
@@ -243,7 +236,6 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 if (camera != null) {
-                    // Get the go2rtc server URL from webServer state
                     val serverUrl = webServer?.go2rtcServerUrl ?: ""
 
                     if (serverUrl.isNotEmpty()) {
@@ -272,14 +264,11 @@ class MainActivity : AppCompatActivity() {
                 if (!streamHealthCheckActive) return
 
                 val timeSinceActivity = System.currentTimeMillis() - lastStreamActivity
-                if (timeSinceActivity > STREAM_TIMEOUT && currentStreamName.isNotEmpty()) {
+                if (timeSinceActivity > streamTimeoutMs && currentStreamName.isNotEmpty()) {
                     Log.w(tag, "Stream appears frozen (${timeSinceActivity}ms since activity)")
                     webServer?.addLog("Stream timeout detected - attempting recovery")
 
-                    cleanupWebView()
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        playStream(currentGo2rtcUrl, currentStreamName, currentProtocol)
-                    }, 1000)
+                    playStream(currentGo2rtcUrl, currentStreamName, currentProtocol)
                 }
 
                 streamHealthHandler.postDelayed(this, 10000)
@@ -294,33 +283,15 @@ class MainActivity : AppCompatActivity() {
 
     private fun checkStreamHealth() {
         val timeSinceActivity = System.currentTimeMillis() - lastStreamActivity
-        if (timeSinceActivity > STREAM_TIMEOUT) {
+        if (timeSinceActivity > streamTimeoutMs) {
             Log.w(tag, "Stream health check failed")
             webServer?.addLog("Stream health check failed - reloading")
-            cleanupWebView()
-            Handler(Looper.getMainLooper()).postDelayed({
-                playStream(currentGo2rtcUrl, currentStreamName, currentProtocol)
-            }, 1000)
-        }
-    }
-
-    private fun cleanupWebView() {
-        try {
-            runOnUiThread {
-                webView.stopLoading()
-                webView.loadUrl("about:blank")
-                webView.clearCache(true)
-                webView.clearHistory()
-                Log.d(tag, "WebView cleaned up")
-            }
-        } catch (e: Exception) {
-            Log.e(tag, "Error cleaning up WebView", e)
+            playStream(currentGo2rtcUrl, currentStreamName, currentProtocol)
         }
     }
 
     private fun startBurnInProtection() {
-        // Load burn-in setting
-        val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+        val prefs = getSharedPreferences("app_prefs", MODE_PRIVATE)
         burnInProtectionEnabled = prefs.getBoolean("burn_in_protection", true)
 
         if (!burnInProtectionEnabled) {
@@ -339,9 +310,8 @@ class MainActivity : AppCompatActivity() {
             if (burnInProtectionEnabled && !tourActive && !burnInBlankActive) {
                 triggerBurnInBlank()
             }
-            // Schedule next check
             scheduleBurnInProtection()
-        }, BURN_IN_INTERVAL)
+        }, burnInIntervalMs)
     }
 
     private fun triggerBurnInBlank() {
@@ -351,31 +321,29 @@ class MainActivity : AppCompatActivity() {
         Log.d(tag, "Burn-in protection: Blanking screen for 1 minute")
         webServer?.addLog("Burn-in protection: Screen blanked")
 
-        // Show black screen
         runOnUiThread {
-            webView.loadData("<html><body style='background:#000'></body></html>", "text/html", "UTF-8")
+            playerShellLoaded = false
+            webView.loadData("<html><body style='background:#000;margin:0'></body></html>", "text/html", "UTF-8")
         }
 
-        // Restore after 1 minute
         burnInHandler.postDelayed({
             burnInBlankActive = false
             Log.d(tag, "Burn-in protection: Restoring display")
             webServer?.addLog("Burn-in protection: Display restored")
 
             runOnUiThread {
-                // Restore previous content
                 if (currentStreamName.isNotEmpty() && currentGo2rtcUrl.isNotEmpty()) {
                     playStream(currentGo2rtcUrl, currentStreamName, currentProtocol)
                 } else {
                     showPlaceholder()
                 }
             }
-        }, BURN_IN_DURATION)
+        }, burnInDurationMs)
     }
 
     private fun setBurnInProtection(enabled: Boolean) {
         burnInProtectionEnabled = enabled
-        val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+        val prefs = getSharedPreferences("app_prefs", MODE_PRIVATE)
         prefs.edit { putBoolean("burn_in_protection", enabled) }
 
         Log.d(tag, "Burn-in protection ${if (enabled) "enabled" else "disabled"}")
@@ -432,7 +400,6 @@ class MainActivity : AppCompatActivity() {
 
             webServer?.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
 
-            // Set burn-in protection callback
             webServer?.setBurnInProtectionCallback { enabled ->
                 runOnUiThread {
                     setBurnInProtection(enabled)
@@ -463,14 +430,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun getLocalIpAddress(): String {
         try {
-            val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
-            while (interfaces.hasMoreElements()) {
-                val intf = interfaces.nextElement()
-                val addrs = intf.inetAddresses
-                while (addrs.hasMoreElements()) {
-                    val addr = addrs.nextElement()
-                    if (!addr.isLoopbackAddress && addr is java.net.Inet4Address) {
-                        return addr.hostAddress ?: "unknown"
+            val networkInterfaces = NetworkInterface.getNetworkInterfaces()
+            while (networkInterfaces.hasMoreElements()) {
+                val networkInterface = networkInterfaces.nextElement()
+                val addresses = networkInterface.inetAddresses
+                while (addresses.hasMoreElements()) {
+                    val address = addresses.nextElement()
+                    if (!address.isLoopbackAddress && address is Inet4Address) {
+                        return address.hostAddress ?: "unknown"
                     }
                 }
             }
@@ -482,7 +449,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadCameras(): List<CameraConfig> {
         try {
-            val prefs = getSharedPreferences("cameras", Context.MODE_PRIVATE)
+            val prefs = getSharedPreferences("cameras", MODE_PRIVATE)
             val json = prefs.getString("camera_list", "[]") ?: "[]"
             val jsonArray = JSONArray(json)
             val cameras = mutableListOf<CameraConfig>()
@@ -508,10 +475,9 @@ class MainActivity : AppCompatActivity() {
             return emptyList()
         }
     }
-
     private fun saveCameras(cameras: List<CameraConfig>) {
         try {
-            val prefs = getSharedPreferences("cameras", Context.MODE_PRIVATE)
+            val prefs = getSharedPreferences("cameras", MODE_PRIVATE)
             val jsonArray = JSONArray()
 
             cameras.forEach { cam ->
@@ -593,49 +559,89 @@ class MainActivity : AppCompatActivity() {
             Log.d(tag, "Protocol: $protocol")
 
             stopStreamHealthMonitoring()
-            cleanupWebView()
 
             currentGo2rtcUrl = go2rtcUrl
             currentStreamName = streamName
             currentProtocol = protocol
 
-            var normalizedUrl = go2rtcUrl.trim().trimEnd('/')
-
-            if (!normalizedUrl.startsWith("http://") && !normalizedUrl.startsWith("https://")) {
-                normalizedUrl = "http://$normalizedUrl"
-                Log.d(tag, "Added http:// prefix")
-            }
-
-            val wsProtocol = if (normalizedUrl.startsWith("https://")) "wss://" else "ws://"
-            val serverUrl = normalizedUrl
-                .replace("http://", "")
-                .replace("https://", "")
-                .trimEnd('/')
-
-            val streamUrl = "$wsProtocol$serverUrl/api/ws?src=$streamName"
-
-            Log.d(tag, "Normalized URL: $normalizedUrl")
-            Log.d(tag, "WebSocket URL: $streamUrl")
-
-            val html = webServer?.getStreamHtml(streamUrl, streamName, protocol) ?: ""
-
-            if (html.contains("stun.l.google")) {
-                Log.e(tag, "⚠️ WARNING: HTML still contains STUN server!")
-                webServer?.addLog("ERROR: STUN server still in HTML")
+            if (playerShellLoaded) {
+                dispatchSwitchToWebView(go2rtcUrl, streamName, protocol)
             } else {
-                Log.d(tag, "✓ Verified: No STUN server in HTML")
+                pendingSwitch = null
+                loadPlayerShell(go2rtcUrl, streamName, protocol)
             }
-
-            Log.d(tag, "HTML length: ${html.length} characters")
-
-            webView.loadDataWithBaseURL(normalizedUrl, html, "text/html", "UTF-8", null)
-
-            Log.d(tag, "Stream HTML loaded into WebView")
-
         } catch (e: Exception) {
             Log.e(tag, "Error playing stream", e)
             webServer?.addLog("Play error: ${e.message}")
             Toast.makeText(this, "Play error: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun loadPlayerShell(go2rtcUrl: String, streamName: String, protocol: String) {
+        var normalizedUrl = go2rtcUrl.trim().trimEnd('/')
+
+        if (!normalizedUrl.startsWith("http://") && !normalizedUrl.startsWith("https://")) {
+            normalizedUrl = "http://$normalizedUrl"
+            Log.d(tag, "Added http:// prefix")
+        }
+
+        val wsProtocol = if (normalizedUrl.startsWith("https://")) "wss://" else "ws://"
+        val serverUrl = normalizedUrl
+            .replace("http://", "")
+            .replace("https://", "")
+            .trimEnd('/')
+
+        val streamUrl = "$wsProtocol$serverUrl/api/ws?src=$streamName"
+
+        Log.d(tag, "Normalized URL: $normalizedUrl")
+        Log.d(tag, "WebSocket URL: $streamUrl")
+
+        val html = webServer?.getStreamHtml(streamUrl, streamName, protocol) ?: ""
+
+        Log.d(tag, "HTML length: ${html.length} characters")
+
+        playerShellLoaded = false
+        webView.loadDataWithBaseURL(normalizedUrl, html, "text/html", "UTF-8", null)
+        playerShellLoaded = true
+        startStreamHealthMonitoring()
+        Log.d(tag, "Stream HTML loaded into WebView (initial load)")
+    }
+
+    private fun dispatchSwitchToWebView(go2rtcUrl: String, streamName: String, protocol: String) {
+        var normalizedUrl = go2rtcUrl.trim().trimEnd('/')
+
+        if (!normalizedUrl.startsWith("http://") && !normalizedUrl.startsWith("https://")) {
+            normalizedUrl = "http://$normalizedUrl"
+        }
+
+        val wsProtocol = if (normalizedUrl.startsWith("https://")) "wss://" else "ws://"
+        val serverUrl = normalizedUrl
+            .replace("http://", "")
+            .replace("https://", "")
+            .trimEnd('/')
+
+        val streamUrl = "$wsProtocol$serverUrl/api/ws?src=$streamName"
+        val forceWebRTC = protocol == "webrtc"
+        val forceMSE = protocol == "mse"
+
+        val safeStreamUrl = streamUrl.replace("\\", "\\\\").replace("'", "\\'")
+        val safeStreamName = streamName.replace("\\", "\\\\").replace("'", "\\'")
+
+        val js = "if (typeof switchStream === 'function') { " +
+                "switchStream('$safeStreamUrl', '$safeStreamName', $forceWebRTC, $forceMSE); true; " +
+                "} else { false; }"
+
+        Log.d(tag, "Dispatching in-place stream switch: $streamUrl")
+
+        webView.evaluateJavascript(js) { result ->
+            if (result != "true") {
+                Log.w(tag, "switchStream() not available in page, falling back to full reload")
+                runOnUiThread {
+                    loadPlayerShell(go2rtcUrl, streamName, protocol)
+                }
+            } else {
+                startStreamHealthMonitoring()
+            }
         }
     }
 
@@ -648,96 +654,51 @@ class MainActivity : AppCompatActivity() {
                 val bytes = inputStream.readBytes()
                 inputStream.close()
                 Log.d(tag, "Logo loaded: ${bytes.size} bytes")
-                android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                Base64.encodeToString(bytes, Base64.NO_WRAP)
             } catch (e: Exception) {
                 Log.e(tag, "Error loading logo", e)
                 null
             }
 
             val logoHtml = if (logoBase64 != null) {
-                """<img src="data:image/png;base64,$logoBase64" alt="Logo" class="logo">"""
+                "<img src=\"data:image/png;base64,$logoBase64\" style=\"max-width:200px;\" />"
             } else {
-                """<div class="logo-fallback">📹</div>"""
+                "<div style=\"font-size:64px;\">\uD83D\uDCF9</div>"
             }
 
             val ipAddress = getLocalIpAddress()
 
             val html = """
-<!DOCTYPE html>
-<html>
-<head>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            background: #000;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            font-family: Arial, sans-serif;
-            color: #666;
-        }
-        .placeholder {
-            text-align: center;
-        }
-.logo {
-    width: 150px;
-    height: 150px;
-    margin: 0 auto 30px;
-    border-radius: 20px;
-    object-fit: contain;
-    background: radial-gradient(circle, #1a1a1a 0%, #000 70%);
-    padding: 25px;
-}
-        .logo-fallback {
-            font-size: 120px;
-            margin-bottom: 20px;
-        }
-        .message {
-            font-size: 24px;
-            margin-bottom: 10px;
-            color: #888;
-        }
-        .submessage {
-            font-size: 16px;
-            color: #555;
-            margin-top: 20px;
-        }
-        .url {
-            font-size: 18px;
-            color: #007bff;
-            margin-top: 10px;
-            font-family: monospace;
-        }
-    </style>
-</head>
-<body>
-    <div class="placeholder">
-        $logoHtml
-        <div class="message">Awaiting Stream</div>
-        <div class="submessage">Configure via web interface:</div>
-        <div class="url">http://$ipAddress:$webServerPort</div>
-    </div>
-</body>
-</html>
-        """.trimIndent()
+                <!DOCTYPE html>
+                <html>
+                <head>
+                <style>
+                body { background:#000; color:#fff; margin:0; height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center; font-family:Arial, sans-serif; }
+                </style>
+                </head>
+                <body>
+                $logoHtml
+                <h2>Awaiting Stream</h2>
+                <p>Configure via web interface:</p>
+                <p>http://$ipAddress:$webServerPort</p>
+                </body>
+                </html>
+            """.trimIndent()
 
             Log.d(tag, "Loading placeholder HTML (${html.length} bytes)")
+            playerShellLoaded = false
             webView.loadDataWithBaseURL("http://localhost", html, "text/html", "UTF-8", null)
             Log.d(tag, "Placeholder loaded successfully")
 
         } catch (e: Exception) {
             Log.e(tag, "Error showing placeholder", e)
             try {
-                webView.loadData("<html><body style='background:#000'></body></html>", "text/html", "UTF-8")
+                webView.loadData("", "text/html", "UTF-8")
             } catch (e2: Exception) {
                 Log.e(tag, "Can't load fallback HTML", e2)
             }
         }
     }
-
     private fun tryAlternativePort() {
         val alternativePorts = listOf(9999, 8000, 5000, 3000, 7777)
 
@@ -785,11 +746,16 @@ class MainActivity : AppCompatActivity() {
                         saveCameras(cameras)
                     }
                 )
+
                 webServer?.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
 
                 val ipAddress = getLocalIpAddress()
                 Log.d(tag, "Server started on alternative port $port")
-
+                Toast.makeText(
+                    this,
+                    "Server: http://$ipAddress:$port",
+                    Toast.LENGTH_LONG
+                ).show()
                 return
 
             } catch (e: Exception) {
@@ -803,14 +769,12 @@ class MainActivity : AppCompatActivity() {
     @Suppress("DEPRECATION")
     private fun hideSystemUI() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // API 30+ (Android 11+)
             WindowCompat.setDecorFitsSystemWindows(window, false)
             window.insetsController?.let { controller ->
                 controller.hide(WindowInsetsCompat.Type.systemBars())
                 controller.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             }
         } else {
-            // API 29 and below
             window.decorView.systemUiVisibility = (
                     View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                             or View.SYSTEM_UI_FLAG_FULLSCREEN
@@ -827,25 +791,12 @@ class MainActivity : AppCompatActivity() {
         if (hasFocus) hideSystemUI()
     }
 
-
     override fun onPause() {
         super.onPause()
-        // try {
-        //     webView.onPause()
-        //     webView.pauseTimers()
-        // } catch (e: Exception) {
-        //     Log.e(tag, "Error in onPause", e)
-        // }
     }
 
     override fun onResume() {
         super.onResume()
-        // try {
-        //     webView.onResume()
-        //     webView.resumeTimers()
-        // } catch (e: Exception) {
-        //     Log.e(tag, "Error in onResume", e)
-        // }
     }
 
     override fun onDestroy() {
