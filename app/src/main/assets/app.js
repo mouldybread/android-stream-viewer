@@ -65,7 +65,30 @@ function loadPersistedLogs() {
 }
 
 // go2rtc URL persistence functions
-function loadSavedGo2rtcUrl() {
+async function loadSavedGo2rtcUrl() {
+    try {
+        const response = await fetch('/api/status');
+        if (response.ok) {
+            const status = await response.json();
+            if (status.go2rtcUrl) {
+                // Save it locally so it stays in sync
+                localStorage.setItem('go2rtcServerUrl', status.go2rtcUrl);
+                serverUrl = status.go2rtcUrl;
+
+                const urlInput = document.getElementById('server-url');
+                const removeBtn = document.getElementById('removeGo2rtcUrlBtn');
+
+                urlInput.value = status.go2rtcUrl;
+                urlInput.disabled = true;
+                removeBtn.style.display = 'inline-block';
+                return;
+            }
+        }
+    } catch (e) {
+        console.error("Failed to fetch go2rtc URL from status:", e);
+    }
+
+    // Fallback to localStorage if /api/status fails or returns empty
     const savedUrl = localStorage.getItem('go2rtcServerUrl');
     const urlInput = document.getElementById('server-url');
     const removeBtn = document.getElementById('removeGo2rtcUrlBtn');
@@ -81,7 +104,7 @@ function loadSavedGo2rtcUrl() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url: savedUrl })
-        }).catch(err => console.error('Failed to sync server URL to Android:', err));
+        }).catch(err => console.error('Failed to sync server URL to Android', err));
     } else {
         urlInput.disabled = false;
         removeBtn.style.display = 'none';
