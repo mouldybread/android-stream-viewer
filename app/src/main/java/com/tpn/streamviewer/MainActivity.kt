@@ -4,27 +4,21 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
-import android.graphics.Bitmap
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
-import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Base64
 import android.util.Log
-import android.view.KeyEvent
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.webkit.ConsoleMessage
-import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
-import android.webkit.WebResourceError
-import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -43,9 +37,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusOverlay: FrameLayout
     private lateinit var errorTextView: TextView
     private var webServer: AndroidWebServer? = null
-    private val webServerPort = 9090
+    private var currentPort = 9090
 
-    private var currentTourIndex = 0
     private var tourCameras: List<CameraConfig> = emptyList()
     private val tourHandler = Handler(Looper.getMainLooper())
     private var tourActive = false
@@ -55,8 +48,8 @@ class MainActivity : AppCompatActivity() {
     // Burn-in protection vars
     private var burnInProtectionEnabled = true
     private val burnInHandler = Handler(Looper.getMainLooper())
-    private val BURN_IN_INTERVAL = 2 * 60 * 60 * 1000L // 2 hours
-    private val BURN_IN_DURATION = 60 * 1000L // 1 minute
+    private val burnInInterval = 2 * 60 * 60 * 1000L // 2 hours
+    private val burnInDuration = 60 * 1000L // 1 minute
     private var burnInBlankActive = false
 
     // Stream state
@@ -69,7 +62,7 @@ class MainActivity : AppCompatActivity() {
     // Stream health monitoring
     private val streamHealthHandler = Handler(Looper.getMainLooper())
     private var lastStreamActivity = 0L
-    private val STREAM_TIMEOUT = 15000L // 15 seconds
+    private val streamTimeout = 15000L // 15 seconds
     private var streamHealthCheckActive = false
     private lateinit var prefs: SharedPreferences
 
@@ -88,8 +81,6 @@ class MainActivity : AppCompatActivity() {
             prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
             isFirstRun = !prefs.getBoolean("initialized", false)
 
-            // webView.setLayerType(View.LAYER_TYPE_HARDWARE, null) // Disabled to prevent PIPELINE_ERROR_DECODE
-
             hideSystemUI()
 
             webView.settings.apply {
@@ -98,10 +89,14 @@ class MainActivity : AppCompatActivity() {
                 mediaPlaybackRequiresUserGesture = false
                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 cacheMode = WebSettings.LOAD_NO_CACHE
-                allowFileAccess = true
-                allowContentAccess = true
-                allowFileAccessFromFileURLs = true
-                allowUniversalAccessFromFileURLs = true
+
+                // Secure local file access settings
+                allowFileAccess = false
+                allowContentAccess = false
+                @Suppress("DEPRECATION")
+                allowFileAccessFromFileURLs = false
+                @Suppress("DEPRECATION")
+                allowUniversalAccessFromFileURLs = false
             }
 
             webView.webChromeClient = object : WebChromeClient() {
@@ -152,13 +147,10 @@ class MainActivity : AppCompatActivity() {
             // Start web server first
             startWebServer()
 
-            // Longer delay on first run for WebView initialization
             val delay = if (isFirstRun) 2000L else 1000L
 
             Handler(Looper.getMainLooper()).postDelayed({
                 try {
-                    // Skip the placeholder entirely if a play request already
-                    // arrived (e.g. intent-triggered playback) or is in-flight.
                     if (!pendingPlayRequest && currentStreamName.isEmpty()) {
                         Log.d(tag, "Loading placeholder screen...")
                         showPlaceholder()
@@ -166,9 +158,10 @@ class MainActivity : AppCompatActivity() {
                         Log.d(tag, "Skipping placeholder - play request already in progress")
                     }
 
-                    // Mark as initialized after successful first load
                     if (isFirstRun) {
-                        prefs.edit().putBoolean("initialized", true).apply()
+                        synchronized(prefs) {
+                            prefs.edit().putBoolean("initialized", true).apply()
+                        }
                         Log.d(tag, "First run initialization complete")
                     }
                 } catch (e: Exception) {
@@ -176,12 +169,10 @@ class MainActivity : AppCompatActivity() {
                 }
             }, delay)
 
-            // Start burn-in protection after everything is initialized
             Handler(Looper.getMainLooper()).postDelayed({
                 startBurnInProtection()
             }, 5000)
 
-            // Handle intent after everything is initialized
             Handler(Looper.getMainLooper()).postDelayed({
                 handleIntent(intent)
             }, 3000)
@@ -191,6 +182,7 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Startup error: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
+
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -199,13 +191,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun handleIntent(intent: Intent?) {
         intent?.let {
-            // Check for camera name extra
             val cameraName = it.getStringExtra("camera_name")
             if (cameraName != null) {
                 Log.d(tag, "Intent received with camera_name: $cameraName")
                 webServer?.addLog("Intent: Loading camera '$cameraName'")
 
-                // Load the camera list and find matching camera
                 val cameras = loadCameras()
                 val camera = cameras.find { cam ->
                     cam.name.equals(cameraName, ignoreCase = true) ||
@@ -213,9 +203,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 if (camera != null) {
-                    // Get the go2rtc server URL from webServer state
-                    val serverUrl = webServer?.go2rtcServerUrl ?: ""
-
+                    val serverUrl = webServer?.getSavedGo2rtcUrl() ?: currentGo2rtcUrl
                     if (serverUrl.isNotEmpty()) {
                         Log.d(tag, "Playing camera: ${camera.name} (${camera.streamName})")
                         playStream(serverUrl, camera.streamName, camera.protocol)
@@ -242,7 +230,7 @@ class MainActivity : AppCompatActivity() {
                 if (!streamHealthCheckActive) return
 
                 val timeSinceActivity = System.currentTimeMillis() - lastStreamActivity
-                if (timeSinceActivity > STREAM_TIMEOUT && currentStreamName.isNotEmpty()) {
+                if (timeSinceActivity > streamTimeout && currentStreamName.isNotEmpty()) {
                     Log.w(tag, "Stream appears frozen (${timeSinceActivity}ms since activity)")
                     webServer?.addLog("Stream timeout detected - attempting recovery")
 
@@ -261,7 +249,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun checkStreamHealth() {
         val timeSinceActivity = System.currentTimeMillis() - lastStreamActivity
-        if (timeSinceActivity > STREAM_TIMEOUT) {
+        if (timeSinceActivity > streamTimeout) {
             Log.w(tag, "Stream health check failed")
             webServer?.addLog("Stream health check failed - reloading")
             playStream(currentGo2rtcUrl, currentStreamName, currentProtocol, forceFullReload = true)
@@ -272,9 +260,6 @@ class MainActivity : AppCompatActivity() {
         try {
             runOnUiThread {
                 webView.stopLoading()
-                // webView.loadUrl("about:blank")
-                // webView.clearCache(true)
-                // webView.clearHistory()
                 Log.d(tag, "WebView softly cleaned up")
             }
         } catch (e: Exception) {
@@ -283,9 +268,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startBurnInProtection() {
-        // Load burn-in setting
-        val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
-        burnInProtectionEnabled = prefs.getBoolean("burn_in_protection", true)
+        val appPrefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+        burnInProtectionEnabled = synchronized(appPrefs) {
+            appPrefs.getBoolean("burn_in_protection", true)
+        }
 
         if (!burnInProtectionEnabled) {
             Log.d(tag, "Burn-in protection disabled")
@@ -303,9 +289,8 @@ class MainActivity : AppCompatActivity() {
             if (burnInProtectionEnabled && !tourActive && !burnInBlankActive) {
                 triggerBurnInBlank()
             }
-            // Schedule next check
             scheduleBurnInProtection()
-        }, BURN_IN_INTERVAL)
+        }, burnInInterval)
     }
 
     private fun triggerBurnInBlank() {
@@ -315,32 +300,31 @@ class MainActivity : AppCompatActivity() {
         Log.d(tag, "Burn-in protection: Blanking screen for 1 minute")
         webServer?.addLog("Burn-in protection: Screen blanked")
 
-        // Show black screen
         runOnUiThread {
-            webView.loadData("", "text/html", "UTF-8")
+            webView.loadDataWithBaseURL(null, "", "text/html", "UTF-8", null)
         }
 
-        // Restore after 1 minute
         burnInHandler.postDelayed({
             burnInBlankActive = false
             Log.d(tag, "Burn-in protection: Restoring display")
             webServer?.addLog("Burn-in protection: Display restored")
 
             runOnUiThread {
-                // Restore previous content
                 if (currentStreamName.isNotEmpty() && currentGo2rtcUrl.isNotEmpty()) {
                     playStream(currentGo2rtcUrl, currentStreamName, currentProtocol, forceFullReload = true)
                 } else {
                     showPlaceholder()
                 }
             }
-        }, BURN_IN_DURATION)
+        }, burnInDuration)
     }
 
     private fun setBurnInProtection(enabled: Boolean) {
         burnInProtectionEnabled = enabled
-        val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
-        prefs.edit().putBoolean("burn_in_protection", enabled).apply()
+        val appPrefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+        synchronized(appPrefs) {
+            appPrefs.edit().putBoolean("burn_in_protection", enabled).apply()
+        }
 
         Log.d(tag, "Burn-in protection ${if (enabled) "enabled" else "disabled"}")
         webServer?.addLog("Burn-in protection ${if (enabled) "enabled" else "disabled"}")
@@ -354,11 +338,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun startWebServer() {
         try {
-            Log.d(tag, "Attempting to start server on port $webServerPort")
+            Log.d(tag, "Attempting to start server on port $currentPort")
 
             webServer = AndroidWebServer(
-                webServerPort,
-                this,
+                currentPort,
+                applicationContext,
                 onStreamConfig = { go2rtcUrl, streamName, protocol ->
                     runOnUiThread {
                         try {
@@ -398,7 +382,7 @@ class MainActivity : AppCompatActivity() {
 
             webServer?.start(fi.iki.elonen.NanoHTTPD.SOCKET_READ_TIMEOUT, false)
             val ipAddress = getLocalIpAddress()
-            Log.d(tag, "Server started on $ipAddress:$webServerPort")
+            Log.d(tag, "Server started on $ipAddress:$currentPort")
 
             runOnUiThread {
                 ipTextView.text = ""
@@ -417,13 +401,42 @@ class MainActivity : AppCompatActivity() {
 
     private fun getLocalIpAddress(): String {
         try {
-            val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
+            val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val activeNetwork = connectivityManager.activeNetwork
+            if (activeNetwork != null) {
+                val caps = connectivityManager.getNetworkCapabilities(activeNetwork)
+                if (caps != null && (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))) {
+                    val interfaces = NetworkInterface.getNetworkInterfaces()
+                    while (interfaces.hasMoreElements()) {
+                        val intf = interfaces.nextElement()
+                        val name = intf.name.lowercase()
+                        if (name.startsWith("wlan") || name.startsWith("eth")) {
+                            val addrs = intf.inetAddresses
+                            while (addrs.hasMoreElements()) {
+                                val addr = addrs.nextElement()
+                                if (!addr.isLoopbackAddress && addr is Inet4Address) {
+                                    return addr.hostAddress ?: "unknown"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            val interfaces = NetworkInterface.getNetworkInterfaces()
             while (interfaces.hasMoreElements()) {
                 val intf = interfaces.nextElement()
+                val name = intf.name.lowercase()
+                if (name.startsWith("tun") || name.startsWith("tap") || name.startsWith("dummy") ||
+                    name.startsWith("docker") || name.startsWith("tailscale") || name.startsWith("p2p")
+                ) {
+                    continue
+                }
                 val addrs = intf.inetAddresses
                 while (addrs.hasMoreElements()) {
                     val addr = addrs.nextElement()
-                    if (!addr.isLoopbackAddress && addr is java.net.Inet4Address) {
+                    if (!addr.isLoopbackAddress && addr is Inet4Address) {
                         return addr.hostAddress ?: "unknown"
                     }
                 }
@@ -436,8 +449,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadCameras(): List<CameraConfig> {
         try {
-            val prefs = getSharedPreferences("cameras", Context.MODE_PRIVATE)
-            val json = prefs.getString("camera_list", "[]") ?: "[]"
+            val cameraPrefs = getSharedPreferences("cameras", Context.MODE_PRIVATE)
+            val json = synchronized(cameraPrefs) {
+                cameraPrefs.getString("camera_list", "[]") ?: "[]"
+            }
             val jsonArray = JSONArray(json)
             val cameras = mutableListOf<CameraConfig>()
 
@@ -465,7 +480,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun saveCameras(cameras: List<CameraConfig>) {
         try {
-            val prefs = getSharedPreferences("cameras", Context.MODE_PRIVATE)
+            val cameraPrefs = getSharedPreferences("cameras", Context.MODE_PRIVATE)
             val jsonArray = JSONArray()
 
             cameras.forEach { cam ->
@@ -481,7 +496,9 @@ class MainActivity : AppCompatActivity() {
                 )
             }
 
-            prefs.edit().putString("camera_list", jsonArray.toString()).apply()
+            synchronized(cameraPrefs) {
+                cameraPrefs.edit().putString("camera_list", jsonArray.toString()).apply()
+            }
             Log.d(tag, "Saved ${cameras.size} cameras to storage")
         } catch (e: Exception) {
             Log.e(tag, "Error saving cameras", e)
@@ -511,7 +528,7 @@ class MainActivity : AppCompatActivity() {
         if (!tourActive || tourCameras.isEmpty()) return
 
         val camera = tourCameras[tourCurrentIndex]
-        val serverUrl = webServer?.go2rtcServerUrl ?: ""
+        val serverUrl = webServer?.getSavedGo2rtcUrl() ?: currentGo2rtcUrl
 
         if (serverUrl.isEmpty()) {
             Log.e(tag, "Tour error: No go2rtc server URL configured")
@@ -538,6 +555,7 @@ class MainActivity : AppCompatActivity() {
         Toast.makeText(this, "Tour stopped", Toast.LENGTH_SHORT).show()
         Log.d(tag, "Tour stopped")
     }
+
     private fun playStream(
         go2rtcUrl: String,
         streamName: String,
@@ -597,6 +615,7 @@ class MainActivity : AppCompatActivity() {
                         currentGo2rtcUrl = go2rtcUrl
                         currentStreamName = streamName
                         currentProtocol = protocol
+                        webServer?.updatePlaybackState(streamName, protocol, go2rtcUrl)
                         lastStreamActivity = System.currentTimeMillis()
                         statusOverlay.visibility = View.GONE
                         errorTextView.visibility = View.GONE
@@ -642,6 +661,7 @@ class MainActivity : AppCompatActivity() {
             currentGo2rtcUrl = go2rtcUrl
             currentStreamName = streamName
             currentProtocol = protocol
+            webServer?.updatePlaybackState(streamName, protocol, go2rtcUrl)
 
             val html = webServer?.getStreamHtml(streamUrl, streamName, protocol) ?: ""
 
@@ -676,8 +696,21 @@ class MainActivity : AppCompatActivity() {
         }, 300)
     }
 
+    private fun getLogoBase64(): String {
+        return try {
+            assets.open("logo.png").use { inputStream ->
+                val bytes = inputStream.readBytes()
+                "data:image/png;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
+            }
+        } catch (e: Exception) {
+            Log.e(tag, "Error loading logo.png from assets", e)
+            ""
+        }
+    }
+
     private fun showPlaceholder() {
         val ipAddress = getLocalIpAddress()
+        val logoSrc = getLogoBase64()
 
         val html = """
             <!DOCTYPE html>
@@ -698,29 +731,45 @@ class MainActivity : AppCompatActivity() {
                         margin: 0;
                         text-align: center;
                     }
-                    h1 { color: #fff; font-weight: normal; margin-bottom: 5px; }
-                    .url { font-size: 1.5em; color: #4fc3f7; margin-top: 15px; }
-                    .info { font-size: 0.9em; margin-top: 30px; opacity: 0.6; }
+                    h1 {
+                        color: #fff;
+                        font-weight: normal;
+                        margin-bottom: 5px;
+                    }
+                    .url {
+                        font-size: 1.5em;
+                        color: #4fc3f7;
+                        margin-top: 15px;
+                    }
+                    .info {
+                        font-size: 0.9em;
+                        margin-top: 30px;
+                        opacity: 0.6;
+                    }
+                    .logo {
+                        max-width: 250px;
+                        height: auto;
+                    }
                 </style>
             </head>
             <body>
-                <img width="250px" src="logo.png" alt="TPN Stream Viewer" class="logo">
+                ${if (logoSrc.isNotEmpty()) "<img src=\"$logoSrc\" alt=\"TPN Stream Viewer\" class=\"logo\">" else ""}
                 <p>Awaiting Stream</p>
                 <p class="info">Configure via web interface:</p>
-                <div class="url">http://$ipAddress:$webServerPort</div>
+                <div class="url">http://$ipAddress:$currentPort</div>
             </body>
             </html>
         """.trimIndent()
 
         try {
             Log.d(tag, "Loading placeholder HTML (${html.length} bytes)")
-            webView.loadDataWithBaseURL("file:///android_asset/", html, "text/html", "UTF-8", null)
+            webView.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
             Log.d(tag, "Placeholder loaded successfully")
             ipTextView.visibility = View.VISIBLE
         } catch (e: Exception) {
             Log.e(tag, "Error showing placeholder", e)
             try {
-                webView.loadData("", "text/html", "UTF-8")
+                webView.loadDataWithBaseURL(null, "", "text/html", "UTF-8", null)
             } catch (e2: Exception) {
                 Log.e(tag, "Can't load fallback HTML", e2)
             }
@@ -737,9 +786,9 @@ class MainActivity : AppCompatActivity() {
                     webServer?.stop()
                     Thread.sleep(100)
 
-                    webServer = AndroidWebServer(
+                    val newServer = AndroidWebServer(
                         port,
-                        this@MainActivity,
+                        applicationContext,
                         onStreamConfig = { go2rtcUrl, streamName, protocol ->
                             runOnUiThread {
                                 try {
@@ -771,19 +820,24 @@ class MainActivity : AppCompatActivity() {
                         saveCameras = { cameras -> saveCameras(cameras) }
                     )
 
-                    webServer?.setBurnInProtectionCallback { enabled ->
+                    newServer.setBurnInProtectionCallback { enabled ->
                         runOnUiThread {
                             setBurnInProtection(enabled)
                         }
                     }
 
-                    webServer?.start(fi.iki.elonen.NanoHTTPD.SOCKET_READ_TIMEOUT, false)
+                    newServer.start(fi.iki.elonen.NanoHTTPD.SOCKET_READ_TIMEOUT, false)
+                    webServer = newServer
+                    currentPort = port
                     val ipAddress = getLocalIpAddress()
 
                     Log.d(tag, "Server started on alternative port $port")
 
                     runOnUiThread {
                         ipTextView.text = "http://$ipAddress:$port"
+                        if (currentStreamName.isEmpty()) {
+                            showPlaceholder()
+                        }
                         Toast.makeText(
                             this@MainActivity,
                             "Server: http://$ipAddress:$port",

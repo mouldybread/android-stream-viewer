@@ -1,12 +1,21 @@
 package com.tpn.streamviewer
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.util.Log
+import androidx.core.content.edit
 import fi.iki.elonen.NanoHTTPD
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.text.SimpleDateFormat
+import java.util.ArrayDeque
+import java.util.Date
+import java.util.Locale
+import java.util.UUID
 
 data class CameraConfig(
     val id: String,
@@ -18,7 +27,7 @@ data class CameraConfig(
 )
 
 class AndroidWebServer(
-    port: Int,
+    private val port: Int,
     private val context: Context,
     private val onStreamConfig: (String, String, String) -> Unit,
     private val onTourStart: (List<CameraConfig>, Int) -> Unit,
@@ -27,37 +36,62 @@ class AndroidWebServer(
     private val saveCameras: (List<CameraConfig>) -> Unit
 ) : NanoHTTPD(port) {
 
-    private val TAG = "AndroidWebServer"
-    private val logs = java.util.ArrayDeque<String>()
+    private val tag = "AndroidWebServer"
+    private val logs = ArrayDeque<String>()
     private val maxLogs = 500
 
-    var go2rtcServerUrl: String = ""
+    private val appPrefs: SharedPreferences =
+        context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+    private val streamPrefs: SharedPreferences =
+        context.getSharedPreferences("stream_settings", Context.MODE_PRIVATE)
 
-    // Track current state
+    @Volatile
+    private var go2rtcServerUrl: String = ""
+
+    @Volatile
     private var currentStreamName: String? = null
+
+    @Volatile
     private var currentProtocol: String? = null
+
+    @Volatile
     private var tourRunning: Boolean = false
+
+    @Volatile
     private var defaultStreamName: String? = null
 
-    // Burn-in protection callback
     private var burnInProtectionCallback: ((Boolean) -> Unit)? = null
 
     init {
-        Log.d(TAG, "Server initialized on port $port")
+        Log.d(tag, "Server initialized on port $port")
         addLog("Server initialized on port $port")
 
-        // Load saved go2rtc URL from last discovery
-        val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
-        go2rtcServerUrl = prefs.getString("go2rtc_server_url", "") ?: ""
+        go2rtcServerUrl = synchronized(appPrefs) {
+            appPrefs.getString("go2rtc_server_url", "") ?: ""
+        }
+
         if (go2rtcServerUrl.isNotEmpty()) {
-            Log.d(TAG, "Loaded saved go2rtc URL: $go2rtcServerUrl")
+            Log.d(tag, "Loaded saved go2rtc URL: $go2rtcServerUrl")
             addLog("Loaded go2rtc URL: $go2rtcServerUrl")
+        }
+
+        defaultStreamName = synchronized(streamPrefs) {
+            streamPrefs.getString("default_stream", null)
+        }
+    }
+
+    fun getSavedGo2rtcUrl(): String = go2rtcServerUrl
+
+    fun updatePlaybackState(streamName: String?, protocol: String?, serverUrl: String? = null) {
+        currentStreamName = streamName
+        currentProtocol = protocol
+        if (!serverUrl.isNullOrBlank()) {
+            go2rtcServerUrl = serverUrl
         }
     }
 
     fun addLog(message: String) {
-        val timestamp = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US)
-            .format(java.util.Date())
+        val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
         val logEntry = "[$timestamp] $message"
         synchronized(logs) {
             logs.add(logEntry)
@@ -65,7 +99,7 @@ class AndroidWebServer(
                 logs.removeFirst()
             }
         }
-        Log.d(TAG, message)
+        Log.d(tag, message)
     }
 
     fun setBurnInProtectionCallback(callback: (Boolean) -> Unit) {
@@ -89,10 +123,8 @@ class AndroidWebServer(
             uri == "/api/logs" && method == Method.GET -> handleGetLogs()
             uri == "/api/save-server-url" && method == Method.POST -> handleSaveServerUrl(session)
             uri == "/api/scan-cameras" && method == Method.POST -> handleScanCameras()
-
-            // NEW ENDPOINTS
             uri == "/api/status" && method == Method.GET -> handleGetStatus()
-            uri.startsWith("/api/camera/") && uri.endsWith("/toggle") && method == Method.POST -> handleToggleCamera(session, uri)
+            uri.startsWith("/api/camera/") && uri.endsWith("/toggle") && method == Method.POST -> handleToggleCamera(uri)
             uri == "/api/tour/status" && method == Method.GET -> handleGetTourStatus()
             uri == "/api/default" && method == Method.POST -> handleSetDefault(session)
             uri == "/api/default" && method == Method.GET -> handleGetDefault()
@@ -105,29 +137,56 @@ class AndroidWebServer(
         }
     }
 
+    private fun extractPostData(session: IHTTPSession): String? {
+        val files = HashMap<String, String>()
+        session.parseBody(files)
+        return files["postData"]
+    }
+
     private fun handleSaveServerUrl(session: IHTTPSession): Response {
         return try {
-            val files = HashMap<String, String>()
-            session.parseBody(files)
-            val postData = files["postData"] ?: ""
-            val json = JSONObject(postData)
+            val postData = extractPostData(session)
+            if (postData.isNullOrBlank()) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    JSONObject().put("error", "Missing request body").toString()
+                )
+            }
 
-            val url = json.getString("url")
+            val json = try {
+                JSONObject(postData)
+            } catch (je: JSONException) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    JSONObject().put("error", "Invalid JSON: ${je.message}").toString()
+                )
+            }
+
+            if (!json.has("url")) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    JSONObject().put("error", "Missing required field 'url'").toString()
+                )
+            }
+
+            val url = json.getString("url").trim().trimEnd('/')
             go2rtcServerUrl = url
 
-            // Also save to SharedPreferences for persistence
-            val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
-            prefs.edit().putString("go2rtc_server_url", url).apply()
+            synchronized(appPrefs) {
+                appPrefs.edit { putString("go2rtc_server_url", url) }
+            }
 
             addLog("go2rtc server URL saved: $url")
-
             newFixedLengthResponse(
                 Response.Status.OK,
                 "application/json",
                 JSONObject().put("success", true).toString()
             )
         } catch (e: Exception) {
-            Log.e(TAG, "Error saving server URL", e)
+            Log.e(tag, "Error saving server URL", e)
             addLog("Save server URL error: ${e.message}")
             newFixedLengthResponse(
                 Response.Status.INTERNAL_ERROR,
@@ -139,7 +198,8 @@ class AndroidWebServer(
 
     private fun handleScanCameras(): Response {
         return try {
-            if (go2rtcServerUrl.isEmpty()) {
+            val currentServerUrl = go2rtcServerUrl
+            if (currentServerUrl.isEmpty()) {
                 addLog("Scan failed: No go2rtc server configured")
                 return newFixedLengthResponse(
                     Response.Status.BAD_REQUEST,
@@ -148,32 +208,33 @@ class AndroidWebServer(
                 )
             }
 
-            addLog("Scanning cameras from: $go2rtcServerUrl")
+            addLog("Scanning cameras from: $currentServerUrl")
 
-            // Fetch streams from go2rtc
-            val streamsUrl = "$go2rtcServerUrl/api/streams"
-            val connection = URL(streamsUrl).openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 5000
-            connection.readTimeout = 5000
+            val streamsUrl = "$currentServerUrl/api/streams"
+            val connection = (URL(streamsUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 5000
+                readTimeout = 5000
+                instanceFollowRedirects = true
+            }
 
             val responseCode = connection.responseCode
             if (responseCode == 200) {
-                val response = connection.inputStream.bufferedReader().readText()
+                val response = connection.inputStream.bufferedReader().use { it.readText() }
                 val streamsJson = JSONObject(response)
 
-                // Parse streams and create cameras
                 val newCameras = mutableListOf<CameraConfig>()
                 val existingCameras = getCameras()
                 var order = existingCameras.size
 
-                streamsJson.keys().forEach { streamName ->
-                    // Skip if camera already exists
+                val keys = streamsJson.keys()
+                while (keys.hasNext()) {
+                    val streamName = keys.next()
                     if (existingCameras.none { it.streamName == streamName }) {
                         newCameras.add(
                             CameraConfig(
-                                id = java.util.UUID.randomUUID().toString(),
-                                name = streamName.uppercase(),
+                                id = UUID.randomUUID().toString(),
+                                name = streamName.uppercase(Locale.ROOT),
                                 streamName = streamName,
                                 enabled = true,
                                 protocol = "mse",
@@ -183,13 +244,12 @@ class AndroidWebServer(
                     }
                 }
 
-                // Save all cameras
                 if (newCameras.isNotEmpty()) {
                     val allCameras = existingCameras + newCameras
                     saveCameras(allCameras)
                     addLog("Imported ${newCameras.size} new cameras")
 
-                    return newFixedLengthResponse(
+                    newFixedLengthResponse(
                         Response.Status.OK,
                         "application/json",
                         JSONObject()
@@ -200,7 +260,7 @@ class AndroidWebServer(
                     )
                 } else {
                     addLog("No new cameras found")
-                    return newFixedLengthResponse(
+                    newFixedLengthResponse(
                         Response.Status.OK,
                         "application/json",
                         JSONObject()
@@ -212,7 +272,7 @@ class AndroidWebServer(
                 }
             } else {
                 addLog("Scan failed: HTTP $responseCode")
-                return newFixedLengthResponse(
+                newFixedLengthResponse(
                     Response.Status.INTERNAL_ERROR,
                     "application/json",
                     JSONObject()
@@ -222,20 +282,16 @@ class AndroidWebServer(
                 )
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error scanning cameras", e)
+            Log.e(tag, "Error scanning cameras", e)
             addLog("Scan error: ${e.message}")
             newFixedLengthResponse(
                 Response.Status.INTERNAL_ERROR,
                 "application/json",
-                JSONObject()
-                    .put("success", false)
-                    .put("message", "Error: ${e.message}")
-                    .toString()
+                JSONObject().put("success", false).put("message", "Error: ${e.message}").toString()
             )
         }
     }
 
-    // Get current playback status
     private fun handleGetStatus(): Response {
         val status = JSONObject().apply {
             put("playing", currentStreamName != null)
@@ -249,10 +305,17 @@ class AndroidWebServer(
         return newFixedLengthResponse(Response.Status.OK, "application/json", status.toString())
     }
 
-    // Toggle camera enabled/disabled
-    private fun handleToggleCamera(session: IHTTPSession, uri: String): Response {
+    private fun handleToggleCamera(uri: String): Response {
         return try {
-            val cameraId = uri.split("/")[3]
+            val parts = uri.split("/")
+            if (parts.size < 4) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    JSONObject().put("error", "Malformed camera toggle URI").toString()
+                )
+            }
+            val cameraId = parts[3]
 
             val cameras = getCameras().toMutableList()
             val camera = cameras.find { it.id == cameraId }
@@ -280,7 +343,7 @@ class AndroidWebServer(
 
             newFixedLengthResponse(Response.Status.OK, "application/json", response.toString())
         } catch (e: Exception) {
-            Log.e(TAG, "Error toggling camera", e)
+            Log.e(tag, "Error toggling camera", e)
             addLog("Toggle error: ${e.message}")
             newFixedLengthResponse(
                 Response.Status.INTERNAL_ERROR,
@@ -290,7 +353,6 @@ class AndroidWebServer(
         }
     }
 
-    // Get tour status
     private fun handleGetTourStatus(): Response {
         val cameras = getCameras().filter { it.enabled }
         val status = JSONObject().apply {
@@ -302,18 +364,36 @@ class AndroidWebServer(
         return newFixedLengthResponse(Response.Status.OK, "application/json", status.toString())
     }
 
-    // Set default stream
     private fun handleSetDefault(session: IHTTPSession): Response {
         return try {
-            val files = HashMap<String, String>()
-            session.parseBody(files)
-            val postData = files["postData"] ?: ""
-            val json = JSONObject(postData)
+            val postData = extractPostData(session)
+            if (postData.isNullOrBlank()) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    JSONObject().put("error", "Missing request body").toString()
+                )
+            }
 
-            defaultStreamName = json.optString("streamName", null)
+            val json = try {
+                JSONObject(postData)
+            } catch (je: JSONException) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    JSONObject().put("error", "Invalid JSON: ${je.message}").toString()
+                )
+            }
 
-            val prefs = context.getSharedPreferences("stream_settings", Context.MODE_PRIVATE)
-            prefs.edit().putString("default_stream", defaultStreamName).apply()
+            defaultStreamName = if (json.has("streamName") && !json.isNull("streamName")) {
+                json.getString("streamName")
+            } else {
+                null
+            }
+
+            synchronized(streamPrefs) {
+                streamPrefs.edit { putString("default_stream", defaultStreamName) }
+            }
 
             addLog("Default stream set: $defaultStreamName")
 
@@ -324,7 +404,7 @@ class AndroidWebServer(
 
             newFixedLengthResponse(Response.Status.OK, "application/json", response.toString())
         } catch (e: Exception) {
-            Log.e(TAG, "Error setting default", e)
+            Log.e(tag, "Error setting default", e)
             addLog("Set default error: ${e.message}")
             newFixedLengthResponse(
                 Response.Status.INTERNAL_ERROR,
@@ -334,10 +414,10 @@ class AndroidWebServer(
         }
     }
 
-    // Get default stream
     private fun handleGetDefault(): Response {
-        val prefs = context.getSharedPreferences("stream_settings", Context.MODE_PRIVATE)
-        val defaultStream = prefs.getString("default_stream", null)
+        val defaultStream = synchronized(streamPrefs) {
+            streamPrefs.getString("default_stream", null)
+        }
 
         val response = JSONObject().apply {
             put("defaultStream", defaultStream ?: JSONObject.NULL)
@@ -346,33 +426,55 @@ class AndroidWebServer(
         return newFixedLengthResponse(Response.Status.OK, "application/json", response.toString())
     }
 
-    // Get burn-in protection status
     private fun handleGetBurnInStatus(): Response {
-        val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
-        val enabled = prefs.getBoolean("burn_in_protection", true)
+        val enabled = synchronized(appPrefs) {
+            appPrefs.getBoolean("burn_in_protection", true)
+        }
 
         val status = JSONObject().apply {
             put("enabled", enabled)
-            put("interval", 120) // 2 hours in minutes
-            put("duration", 60)  // 1 minute in seconds
+            put("interval", 120)
+            put("duration", 60)
         }
 
         addLog("Burn-in protection status requested: ${if (enabled) "enabled" else "disabled"}")
         return newFixedLengthResponse(Response.Status.OK, "application/json", status.toString())
     }
 
-    // Toggle burn-in protection
     private fun handleToggleBurnIn(session: IHTTPSession): Response {
         return try {
-            val files = HashMap<String, String>()
-            session.parseBody(files)
-            val postData = files["postData"] ?: ""
-            val json = JSONObject(postData)
+            val postData = extractPostData(session)
+            if (postData.isNullOrBlank()) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    JSONObject().put("error", "Missing request body").toString()
+                )
+            }
+
+            val json = try {
+                JSONObject(postData)
+            } catch (je: JSONException) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    JSONObject().put("error", "Invalid JSON: ${je.message}").toString()
+                )
+            }
+
+            if (!json.has("enabled")) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    JSONObject().put("error", "Missing required field 'enabled'").toString()
+                )
+            }
 
             val enabled = json.getBoolean("enabled")
 
-            val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
-            prefs.edit().putBoolean("burn_in_protection", enabled).apply()
+            synchronized(appPrefs) {
+                appPrefs.edit { putBoolean("burn_in_protection", enabled) }
+            }
 
             burnInProtectionCallback?.invoke(enabled)
 
@@ -385,7 +487,7 @@ class AndroidWebServer(
 
             newFixedLengthResponse(Response.Status.OK, "application/json", response.toString())
         } catch (e: Exception) {
-            Log.e(TAG, "Error toggling burn-in protection", e)
+            Log.e(tag, "Error toggling burn-in protection", e)
             addLog("Burn-in toggle error: ${e.message}")
             newFixedLengthResponse(
                 Response.Status.INTERNAL_ERROR,
@@ -421,7 +523,7 @@ class AndroidWebServer(
             addLog("Camera names requested: $names")
             newFixedLengthResponse(Response.Status.OK, "text/plain", names)
         } catch (e: Exception) {
-            Log.e(TAG, "Error getting camera names", e)
+            Log.e(tag, "Error getting camera names", e)
             addLog("Camera names error: ${e.message}")
             newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", "Error: ${e.message}")
         }
@@ -429,85 +531,162 @@ class AndroidWebServer(
 
     private fun handleSaveCameras(session: IHTTPSession): Response {
         return try {
-            val files = HashMap<String, String>()
-            session.parseBody(files)
-            val postData = files["postData"] ?: ""
-            val jsonArray = JSONArray(postData)
+            val postData = extractPostData(session)
+            if (postData.isNullOrBlank()) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    JSONObject().put("error", "Missing request body").toString()
+                )
+            }
+
+            val jsonArray = try {
+                JSONArray(postData)
+            } catch (je: JSONException) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    JSONObject().put("error", "Invalid JSON array: ${je.message}").toString()
+                )
+            }
 
             val cameras = mutableListOf<CameraConfig>()
             for (i in 0 until jsonArray.length()) {
                 val obj = jsonArray.getJSONObject(i)
-                cameras.add(CameraConfig(
-                    id = obj.getString("id"),
-                    name = obj.getString("name"),
-                    streamName = obj.getString("streamName"),
-                    enabled = obj.getBoolean("enabled"),
-                    protocol = obj.optString("protocol", "mse"),
-                    order = obj.optInt("order", i)
-                ))
+                cameras.add(
+                    CameraConfig(
+                        id = if (obj.has("id")) obj.getString("id") else UUID.randomUUID().toString(),
+                        name = obj.getString("name"),
+                        streamName = obj.getString("streamName"),
+                        enabled = if (obj.has("enabled")) obj.getBoolean("enabled") else true,
+                        protocol = obj.optString("protocol", "mse"),
+                        order = obj.optInt("order", i)
+                    )
+                )
             }
 
             saveCameras(cameras)
             addLog("Saved ${cameras.size} cameras")
 
-            newFixedLengthResponse(Response.Status.OK, "application/json",
-                JSONObject().put("success", true).toString())
+            newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                JSONObject().put("success", true).toString()
+            )
         } catch (e: Exception) {
-            Log.e(TAG, "Error saving cameras", e)
+            Log.e(tag, "Error saving cameras", e)
             addLog("Save error: ${e.message}")
-            newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "application/json",
-                JSONObject().put("error", e.message).toString())
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                JSONObject().put("error", e.message).toString()
+            )
         }
     }
 
+    
+
     private fun handleStreamConfig(session: IHTTPSession): Response {
         return try {
-            val files = HashMap<String, String>()
-            session.parseBody(files)
-            val postData = files["postData"] ?: ""
-            val json = JSONObject(postData)
+            val postData = extractPostData(session)
+            if (postData.isNullOrBlank()) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    JSONObject().put("error", "Missing request body").toString()
+                )
+            }
 
-            go2rtcServerUrl = json.getString("go2rtcUrl")
+            val json = try {
+                JSONObject(postData)
+            } catch (je: JSONException) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    JSONObject().put("error", "Invalid JSON: ${je.message}").toString()
+                )
+            }
+
+            if (!json.has("go2rtcUrl") || !json.has("streamName")) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    JSONObject().put("error", "Missing go2rtcUrl or streamName").toString()
+                )
+            }
+
+            val go2rtcUrl = json.getString("go2rtcUrl")
             val streamName = json.getString("streamName")
             val protocol = json.optString("protocol", "mse")
 
+            go2rtcServerUrl = go2rtcUrl
             currentStreamName = streamName
             currentProtocol = protocol
 
-            addLog("Playing: $streamName from $go2rtcServerUrl (protocol: $protocol)")
-            onStreamConfig(go2rtcServerUrl, streamName, protocol)
+            addLog("Playing: $streamName from $go2rtcUrl (protocol: $protocol)")
+            onStreamConfig(go2rtcUrl, streamName, protocol)
 
-            newFixedLengthResponse(Response.Status.OK, "application/json",
-                JSONObject().put("success", true).toString())
+            newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                JSONObject().put("success", true).toString()
+            )
         } catch (e: Exception) {
-            Log.e(TAG, "Error configuring stream", e)
+            Log.e(tag, "Error configuring stream", e)
             addLog("Config error: ${e.message}")
-            newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "application/json",
-                JSONObject().put("error", e.message).toString())
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                JSONObject().put("error", e.message).toString()
+            )
         }
     }
 
     private fun handleDiscoverCameras(session: IHTTPSession): Response {
         return try {
-            val files = HashMap<String, String>()
-            session.parseBody(files)
-            val postData = files["postData"] ?: ""
-            val json = JSONObject(postData)
+            val postData = extractPostData(session)
+            if (postData.isNullOrBlank()) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    JSONObject().put("error", "Missing request body").toString()
+                )
+            }
 
-            val serverUrl = json.getString("serverUrl").trimEnd('/')
+            val json = try {
+                JSONObject(postData)
+            } catch (je: JSONException) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    JSONObject().put("error", "Invalid JSON: ${je.message}").toString()
+                )
+            }
+
+            if (!json.has("serverUrl")) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    JSONObject().put("error", "Missing serverUrl").toString()
+                )
+            }
+
+            val serverUrl = json.getString("serverUrl").trim().trimEnd('/')
             go2rtcServerUrl = serverUrl
 
-            // Save the URL to SharedPreferences for persistence
-            val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
-            prefs.edit().putString("go2rtc_server_url", serverUrl).apply()
+            synchronized(appPrefs) {
+                appPrefs.edit { putString("go2rtc_server_url", serverUrl) }
+            }
 
             addLog("Discovering cameras from: $serverUrl")
 
             val url = URL("$serverUrl/api/streams")
-            val connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 5000
-            connection.readTimeout = 5000
+            val connection = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 5000
+                readTimeout = 5000
+                instanceFollowRedirects = true
+            }
 
             val responseCode = connection.responseCode
             addLog("Discovery response code: $responseCode")
@@ -518,44 +697,73 @@ class AndroidWebServer(
                 newFixedLengthResponse(Response.Status.OK, "application/json", response)
             } else {
                 addLog("Discovery failed with code: $responseCode")
-                newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "application/json",
-                    JSONObject().put("error", "Failed to discover cameras: HTTP $responseCode").toString())
+                newFixedLengthResponse(
+                    Response.Status.INTERNAL_ERROR,
+                    "application/json",
+                    JSONObject().put("error", "Failed to discover cameras: HTTP $responseCode").toString()
+                )
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error discovering cameras", e)
+            Log.e(tag, "Error discovering cameras", e)
             addLog("Discovery error: ${e.message}")
-            newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "application/json",
-                JSONObject().put("error", e.message).toString())
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                JSONObject().put("error", e.message).toString()
+            )
         }
     }
 
     private fun handleTourStart(session: IHTTPSession): Response {
         return try {
-            val files = HashMap<String, String>()
-            session.parseBody(files)
-            val postData = files["postData"] ?: ""
-            val json = JSONObject(postData)
+            val postData = extractPostData(session)
+            if (postData.isNullOrBlank()) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    JSONObject().put("error", "Missing request body").toString()
+                )
+            }
 
-            val duration = json.getInt("duration")
+            val json = try {
+                JSONObject(postData)
+            } catch (je: JSONException) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    JSONObject().put("error", "Invalid JSON: ${je.message}").toString()
+                )
+            }
+
+            val duration = json.optInt("duration", 10)
             val cameras = getCameras().filter { it.enabled }
 
             if (cameras.isEmpty()) {
                 addLog("Tour start failed: No enabled cameras")
-                return newFixedLengthResponse(Response.Status.BAD_REQUEST, "application/json",
-                    JSONObject().put("error", "No enabled cameras").toString())
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    JSONObject().put("error", "No enabled cameras").toString()
+                )
             }
 
             tourRunning = true
             addLog("Tour started: ${cameras.size} cameras, ${duration}s each")
             onTourStart(cameras, duration)
 
-            newFixedLengthResponse(Response.Status.OK, "application/json",
-                JSONObject().put("success", true).put("cameraCount", cameras.size).toString())
+            newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                JSONObject().put("success", true).put("cameraCount", cameras.size).toString()
+            )
         } catch (e: Exception) {
-            Log.e(TAG, "Error starting tour", e)
+            Log.e(tag, "Error starting tour", e)
             addLog("Tour start error: ${e.message}")
-            newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "application/json",
-                JSONObject().put("error", e.message).toString())
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                JSONObject().put("error", e.message).toString()
+            )
         }
     }
 
@@ -566,13 +774,19 @@ class AndroidWebServer(
             currentProtocol = null
             addLog("Tour stopped")
             onTourStop()
-            newFixedLengthResponse(Response.Status.OK, "application/json",
-                JSONObject().put("success", true).toString())
+            newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                JSONObject().put("success", true).toString()
+            )
         } catch (e: Exception) {
-            Log.e(TAG, "Error stopping tour", e)
+            Log.e(tag, "Error stopping tour", e)
             addLog("Tour stop error: ${e.message}")
-            newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "application/json",
-                JSONObject().put("error", e.message).toString())
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                JSONObject().put("error", e.message).toString()
+            )
         }
     }
 
@@ -583,35 +797,42 @@ class AndroidWebServer(
         return newFixedLengthResponse(Response.Status.OK, "text/plain", logsText)
     }
 
-    private fun serveFile(filename: String): Response {
+    private fun serveFile(rawFilename: String): Response {
         return try {
-            val inputStream = context.assets.open(filename)
+            val normalizedPath = File("/$rawFilename").normalize().path.trimStart('/')
+
+            if (normalizedPath.contains("..") || normalizedPath.startsWith("/")) {
+                return newFixedLengthResponse(Response.Status.FORBIDDEN, MIME_PLAINTEXT, "Forbidden")
+            }
+
+            val targetFile = if (normalizedPath.isEmpty()) "index.html" else normalizedPath
+            val inputStream = context.assets.open(targetFile)
             val mimeType = when {
-                filename.endsWith(".html") -> "text/html"
-                filename.endsWith(".css") -> "text/css"
-                filename.endsWith(".js") -> "application/javascript"
-                filename.endsWith(".json") -> "application/json"
-                filename.endsWith(".png") -> "image/png"
-                filename.endsWith(".jpg") || filename.endsWith(".jpeg") -> "image/jpeg"
+                targetFile.endsWith(".html") -> "text/html"
+                targetFile.endsWith(".css") -> "text/css"
+                targetFile.endsWith(".js") -> "application/javascript"
+                targetFile.endsWith(".json") -> "application/json"
+                targetFile.endsWith(".png") -> "image/png"
+                targetFile.endsWith(".jpg") || targetFile.endsWith(".jpeg") -> "image/jpeg"
                 else -> "application/octet-stream"
             }
             newChunkedResponse(Response.Status.OK, mimeType, inputStream)
         } catch (e: Exception) {
-            Log.e(TAG, "Error serving file: $filename", e)
-            addLog("File serve error: $filename - ${e.message}")
-            newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "File not found: $filename")
+            Log.e(tag, "Error serving file: $rawFilename", e)
+            addLog("File serve error: $rawFilename - ${e.message}")
+            newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "File not found: $rawFilename")
         }
     }
 
     fun getStreamHtml(streamUrl: String, streamName: String, protocol: String): String {
-        val forceWebRTC = protocol == "webrtc"
-        val forceMSE = protocol == "mse"
+        val forceWebRTC = protocol.equals("webrtc", ignoreCase = true)
+        val forceMSE = protocol.equals("mse", ignoreCase = true)
 
         val safeStreamUrl = streamUrl.replace("\\", "\\\\").replace("'", "\\'")
         val safeStreamName = streamName.replace("\\", "\\\\").replace("'", "\\'")
 
         return try {
-            val template = context.assets.open("stream.html").bufferedReader().readText()
+            val template = context.assets.open("stream.html").bufferedReader().use { it.readText() }
             val html = template
                 .replace("{{STREAM_URL}}", safeStreamUrl)
                 .replace("{{STREAM_NAME}}", safeStreamName)
@@ -619,23 +840,18 @@ class AndroidWebServer(
                 .replace("{{FORCE_MSE}}", forceMSE.toString())
 
             if (html.contains("stun.l.google")) {
-                Log.e(TAG, "⚠️⚠️⚠️ CRITICAL: HTML STILL CONTAINS STUN SERVER! ⚠️⚠️⚠️")
+                Log.e(tag, "CRITICAL: HTML STILL CONTAINS STUN SERVER!")
                 addLog("ERROR: STUN server found in HTML template!")
             } else {
-                Log.d(TAG, "✓ STUN verification passed")
+                Log.d(tag, "STUN verification passed")
             }
 
-            addLog("Stream HTML generated:")
-            addLog("  URL: $safeStreamUrl")
-            addLog("  Name: $safeStreamName")
-            addLog("  Protocol: $protocol (WebRTC: $forceWebRTC, MSE: $forceMSE)")
-            addLog("  HTML size: ${html.length} bytes")
-
+            addLog("Stream HTML generated: Name: $safeStreamName, Protocol: $protocol")
             html
         } catch (e: Exception) {
-            Log.e(TAG, "Error loading stream template", e)
+            Log.e(tag, "Error loading stream template", e)
             addLog("ERROR loading stream.html: ${e.message}")
-            "<html><body>Error loading stream</body></html>"
+            "Error loading stream"
         }
     }
 }
