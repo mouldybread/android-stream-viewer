@@ -1,3 +1,5 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -42,8 +44,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_11
     }
 
-    kotlinOptions {
-        jvmTarget = "11"
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_11)
+        }
     }
 }
 
@@ -53,12 +57,8 @@ dependencies {
     implementation(libs.material)
     implementation(libs.androidx.activity)
     implementation(libs.androidx.constraintlayout)
-
-    // WebView support
-    implementation("androidx.webkit:webkit:1.12.1")
-
-    // NanoHTTPD for embedded web server
-    implementation("org.nanohttpd:nanohttpd:2.3.1")
+    implementation(libs.androidx.webkit)
+    implementation(libs.nanohttpd)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

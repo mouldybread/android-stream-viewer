@@ -27,7 +27,7 @@ data class CameraConfig(
 )
 
 class AndroidWebServer(
-    private val port: Int,
+    port: Int,
     private val context: Context,
     private val onStreamConfig: (String, String, String) -> Unit,
     private val onTourStart: (List<CameraConfig>, Int) -> Unit,
@@ -583,8 +583,6 @@ class AndroidWebServer(
             )
         }
     }
-
-    
 
     private fun handleStreamConfig(session: IHTTPSession): Response {
         return try {

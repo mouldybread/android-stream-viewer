@@ -16,6 +16,7 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.webkit.ConsoleMessage
+import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -23,6 +24,7 @@ import android.widget.FrameLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.edit
 import androidx.core.view.WindowCompat
 import org.json.JSONArray
 import org.json.JSONObject
@@ -66,7 +68,7 @@ class MainActivity : AppCompatActivity() {
     private var streamHealthCheckActive = false
     private lateinit var prefs: SharedPreferences
 
-    @SuppressLint("SetJavaScriptEnabled", "AddJavascriptInterface")
+    @SuppressLint("SetJavaScriptEnabled", "AddJavascriptInterface", "SetTextI18n")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -119,7 +121,7 @@ class MainActivity : AppCompatActivity() {
             // JavaScript interface to monitor stream health
             webView.addJavascriptInterface(object {
                 @Suppress("unused")
-                @android.webkit.JavascriptInterface
+                @JavascriptInterface
                 fun onStreamPlaying() {
                     runOnUiThread {
                         lastStreamActivity = System.currentTimeMillis()
@@ -128,7 +130,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 @Suppress("unused")
-                @android.webkit.JavascriptInterface
+                @JavascriptInterface
                 fun onStreamError(message: String) {
                     runOnUiThread {
                         Log.e(tag, "Stream error from JS: $message")
@@ -160,7 +162,7 @@ class MainActivity : AppCompatActivity() {
 
                     if (isFirstRun) {
                         synchronized(prefs) {
-                            prefs.edit().putBoolean("initialized", true).apply()
+                            prefs.edit { putBoolean("initialized", true) }
                         }
                         Log.d(tag, "First run initialization complete")
                     }
@@ -323,7 +325,7 @@ class MainActivity : AppCompatActivity() {
         burnInProtectionEnabled = enabled
         val appPrefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
         synchronized(appPrefs) {
-            appPrefs.edit().putBoolean("burn_in_protection", enabled).apply()
+            appPrefs.edit { putBoolean("burn_in_protection", enabled) }
         }
 
         Log.d(tag, "Burn-in protection ${if (enabled) "enabled" else "disabled"}")
@@ -336,6 +338,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @SuppressLint("SetTextI18n")
     private fun startWebServer() {
         try {
             Log.d(tag, "Attempting to start server on port $currentPort")
@@ -497,7 +500,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             synchronized(cameraPrefs) {
-                cameraPrefs.edit().putString("camera_list", jsonArray.toString()).apply()
+                cameraPrefs.edit { putString("camera_list", jsonArray.toString()) }
             }
             Log.d(tag, "Saved ${cameras.size} cameras to storage")
         } catch (e: Exception) {
@@ -556,6 +559,7 @@ class MainActivity : AppCompatActivity() {
         Log.d(tag, "Tour stopped")
     }
 
+    @SuppressLint("SetTextI18n")
     private fun playStream(
         go2rtcUrl: String,
         streamName: String,
@@ -647,6 +651,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @SuppressLint("SetTextI18n")
     private fun loadStreamFullReload(
         go2rtcUrl: String,
         streamName: String,
@@ -776,6 +781,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @SuppressLint("SetTextI18n")
     private fun tryAlternativePort() {
         Thread {
             val alternativePorts = listOf(9999, 8000, 5000, 3000, 7777)
