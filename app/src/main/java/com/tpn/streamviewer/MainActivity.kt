@@ -61,6 +61,12 @@ class MainActivity : AppCompatActivity() {
     private var pendingPlayRequest = false
     private var isFirstRun = true
 
+    // Debounce & rapid switch protection
+    private val playStreamHandler = Handler(Looper.getMainLooper())
+    private var scheduledPlayRunnable: Runnable? = null
+    private var lastPlayTriggerTime: Long = 0L
+    private val minSwitchIntervalMs: Long = 1200L
+
     // Stream health monitoring
     private val streamHealthHandler = Handler(Looper.getMainLooper())
     private var lastStreamActivity = 0L
@@ -518,10 +524,10 @@ class MainActivity : AppCompatActivity() {
 
         tourActive = true
         tourCameras = cameras
-        tourDuration = duration
+        tourDuration = maxOf(duration, 5) // Enforce 5s minimum safety margin for tours
         tourCurrentIndex = 0
 
-        Log.d(tag, "Starting tour with ${cameras.size} cameras, ${duration}s each")
+        Log.d(tag, "Starting tour with ${cameras.size} cameras, ${tourDuration}s each")
         Toast.makeText(this, "Tour started: ${cameras.size} cameras", Toast.LENGTH_SHORT).show()
 
         playNextTourCamera()
@@ -566,6 +572,34 @@ class MainActivity : AppCompatActivity() {
         protocol: String = "mse",
         forceFullReload: Boolean = false
     ) {
+        // Cancel any pending switch that hasn't executed yet (debounce)
+        scheduledPlayRunnable?.let { playStreamHandler.removeCallbacks(it) }
+
+        val now = System.currentTimeMillis()
+        val timeSinceLast = now - lastPlayTriggerTime
+
+        if (timeSinceLast < minSwitchIntervalMs && !forceFullReload && currentStreamName.isNotEmpty()) {
+            val waitTime = minSwitchIntervalMs - timeSinceLast
+            Log.d(tag, "Throttling rapid switch request by ${waitTime}ms to protect hardware decoder")
+
+            val scheduledRunnable = Runnable {
+                executePlayStream(go2rtcUrl, streamName, protocol, forceFullReload)
+            }
+            scheduledPlayRunnable = scheduledRunnable
+            playStreamHandler.postDelayed(scheduledRunnable, waitTime)
+        } else {
+            executePlayStream(go2rtcUrl, streamName, protocol, forceFullReload)
+        }
+    }
+
+    private fun executePlayStream(
+        go2rtcUrl: String,
+        streamName: String,
+        protocol: String,
+        forceFullReload: Boolean
+    ) {
+        lastPlayTriggerTime = System.currentTimeMillis()
+
         try {
             Log.d(tag, "=== Play Stream Request ===")
             Log.d(tag, "go2rtc URL: $go2rtcUrl")
@@ -660,6 +694,13 @@ class MainActivity : AppCompatActivity() {
         streamUrl: String
     ) {
         pendingPlayRequest = true
+
+        // 1. Tell JS player to stop media streams and unbind video elements before reload
+        webView.evaluateJavascript(
+            "(function(){ if (window.stopStream) { window.stopStream(); } var v = document.querySelector('video'); if (v) { v.pause(); v.src = ''; v.srcObject = null; } })();",
+            null
+        )
+
         cleanupWebView()
 
         Handler(Looper.getMainLooper()).postDelayed({
@@ -914,6 +955,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         try {
+            scheduledPlayRunnable?.let { playStreamHandler.removeCallbacks(it) }
             webServer?.stop()
             webServer = null
             tourHandler.removeCallbacksAndMessages(null)

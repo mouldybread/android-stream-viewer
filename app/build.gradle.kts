@@ -5,6 +5,27 @@ plugins {
     alias(libs.plugins.kotlin.android)
 }
 
+// Automatic version resolution: Supports Gradle CLI flags (-PCI_VERSION_CODE / -PCI_VERSION_NAME),
+// CI environment variables, and Git metadata fallbacks for local builds.
+val gitCommitCount = providers.exec {
+    commandLine("git", "rev-list", "--count", "HEAD")
+}.standardOutput.asText.map { it.trim().toIntOrNull() ?: 1 }
+
+val gitTag = providers.exec {
+    commandLine("git", "describe", "--tags", "--always")
+}.standardOutput.asText.map { it.trim() }
+
+val computedVersionCode = providers.gradleProperty("CI_VERSION_CODE")
+    .map { it.toIntOrNull() }
+    .orElse(providers.environmentVariable("GITHUB_RUN_NUMBER").map { it.toIntOrNull() })
+    .orElse(gitCommitCount)
+    .get() ?: 1
+
+val computedVersionName = providers.gradleProperty("CI_VERSION_NAME")
+    .orElse(providers.environmentVariable("GITHUB_REF_NAME").map { it.removePrefix("v") })
+    .orElse(gitTag.map { it.removePrefix("v") })
+    .get() ?: "1.1.3"
+
 android {
     namespace = "com.tpn.streamviewer"
     compileSdk = 36
@@ -13,8 +34,8 @@ android {
         applicationId = "com.tpn.streamviewer"
         minSdk = 25
         targetSdk = 36
-        versionCode = 5
-        versionName = "1.1.3"
+        versionCode = computedVersionCode
+        versionName = computedVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
