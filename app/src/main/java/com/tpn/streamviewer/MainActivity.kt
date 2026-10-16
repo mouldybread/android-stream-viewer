@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.graphics.Color
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
@@ -67,12 +68,21 @@ class MainActivity : AppCompatActivity() {
     private var lastPlayTriggerTime: Long = 0L
     private val minSwitchIntervalMs: Long = 1200L
 
+    // Full-reload scheduling
+    private val reloadHandler = Handler(Looper.getMainLooper())
+    private var scheduledReloadRunnable: Runnable? = null
+
     // Stream health monitoring
     private val streamHealthHandler = Handler(Looper.getMainLooper())
     private var lastStreamActivity = 0L
     private val streamTimeout = 15000L // 15 seconds
     private var streamHealthCheckActive = false
+    private var streamHealthGeneration = 0
     private lateinit var prefs: SharedPreferences
+
+    // Error-driven recovery
+    private var lastErrorRecoveryTime = 0L
+    private val errorRecoveryCooldownMs = 5000L
 
     @SuppressLint("SetJavaScriptEnabled", "AddJavascriptInterface", "SetTextI18n")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -86,6 +96,8 @@ class MainActivity : AppCompatActivity() {
             statusOverlay = findViewById(R.id.statusOverlay)
             errorTextView = findViewById(R.id.errorTextView)
 
+            webView.setBackgroundColor(Color.BLACK)
+
             prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
             isFirstRun = !prefs.getBoolean("initialized", false)
 
@@ -97,8 +109,6 @@ class MainActivity : AppCompatActivity() {
                 mediaPlaybackRequiresUserGesture = false
                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 cacheMode = WebSettings.LOAD_NO_CACHE
-
-                // Secure local file access settings
                 allowFileAccess = false
                 allowContentAccess = false
                 @Suppress("DEPRECATION")
@@ -124,7 +134,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // JavaScript interface to monitor stream health
             webView.addJavascriptInterface(object {
                 @Suppress("unused")
                 @JavascriptInterface
@@ -132,6 +141,10 @@ class MainActivity : AppCompatActivity() {
                     runOnUiThread {
                         lastStreamActivity = System.currentTimeMillis()
                         Log.d(tag, "Stream heartbeat received")
+
+                        if (statusOverlay.visibility == View.VISIBLE) {
+                            statusOverlay.visibility = View.GONE
+                        }
                     }
                 }
 
@@ -142,17 +155,32 @@ class MainActivity : AppCompatActivity() {
                         Log.e(tag, "Stream error from JS: $message")
                         webServer?.addLog("Stream error: $message")
 
+                        // IGNORING EXPECTED TEARDOWN ERRORS
+                        if (message.contains("Empty src attribute") ||
+                            message.contains("MEDIA_ELEMENT_ERROR") ||
+                            pendingPlayRequest) {
+                            Log.d(tag, "Ignoring expected error during stream teardown")
+                            return@runOnUiThread
+                        }
+
                         if (message.contains("PIPELINE_ERROR_DECODE") || message.contains("MEDIA_ERR_DECODE")) {
                             Log.w(tag, "Decode error detected, switching to software layer type")
                             webView.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                         }
 
-                        checkStreamHealth()
+                        val now = System.currentTimeMillis()
+                        if (now - lastErrorRecoveryTime > errorRecoveryCooldownMs) {
+                            lastErrorRecoveryTime = now
+                            Log.w(tag, "JS reported stream error - forcing recovery reload")
+                            webServer?.addLog("Forcing recovery reload due to JS-reported stall")
+                            playStream(currentGo2rtcUrl, currentStreamName, currentProtocol, forceFullReload = true)
+                        } else {
+                            Log.d(tag, "Skipping forced recovery - within cooldown window")
+                        }
                     }
                 }
             }, "AndroidInterface")
 
-            // Start web server first
             startWebServer()
 
             val delay = if (isFirstRun) 2000L else 1000L
@@ -214,6 +242,12 @@ class MainActivity : AppCompatActivity() {
                     val serverUrl = webServer?.getSavedGo2rtcUrl() ?: currentGo2rtcUrl
                     if (serverUrl.isNotEmpty()) {
                         Log.d(tag, "Playing camera: ${camera.name} (${camera.streamName})")
+
+                        // CLEAR ALL PENDING JOBS TO PREVENT RACE CONDITIONS
+                        stopStreamHealthMonitoring()
+                        scheduledReloadRunnable?.let { reloadHandler.removeCallbacks(it) }
+                        scheduledPlayRunnable?.let { playStreamHandler.removeCallbacks(it) }
+
                         playStream(serverUrl, camera.streamName, camera.protocol)
                         Toast.makeText(this, "Loading: ${camera.name}", Toast.LENGTH_SHORT).show()
                     } else {
@@ -228,40 +262,49 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * (Re)starts the stream health watchdog. Safe to call even if monitoring
+     * is already running - it always tears down any previous chain first and
+     * starts a brand new one tied to a fresh generation token.
+     */
     private fun startStreamHealthMonitoring() {
-        if (streamHealthCheckActive) return
+        streamHealthHandler.removeCallbacksAndMessages(null)
+
         streamHealthCheckActive = true
         lastStreamActivity = System.currentTimeMillis()
+        val myGeneration = ++streamHealthGeneration
 
-        streamHealthHandler.postDelayed(object : Runnable {
+        val checkRunnable = object : Runnable {
             override fun run() {
-                if (!streamHealthCheckActive) return
-
-                val timeSinceActivity = System.currentTimeMillis() - lastStreamActivity
-                if (timeSinceActivity > streamTimeout && currentStreamName.isNotEmpty()) {
-                    Log.w(tag, "Stream appears frozen (${timeSinceActivity}ms since activity)")
-                    webServer?.addLog("Stream timeout detected - attempting recovery")
-
-                    playStream(currentGo2rtcUrl, currentStreamName, currentProtocol, forceFullReload = true)
+                if (!streamHealthCheckActive || myGeneration != streamHealthGeneration) {
+                    return
                 }
 
-                streamHealthHandler.postDelayed(this, 10000)
+                try {
+                    val timeSinceActivity = System.currentTimeMillis() - lastStreamActivity
+                    if (timeSinceActivity > streamTimeout && currentStreamName.isNotEmpty()) {
+                        Log.w(tag, "Stream appears frozen (${timeSinceActivity}ms since activity)")
+                        webServer?.addLog("Stream timeout detected - attempting recovery")
+
+                        playStream(currentGo2rtcUrl, currentStreamName, currentProtocol, forceFullReload = true)
+                    }
+                } catch (e: Exception) {
+                    Log.e(tag, "Error during stream health check", e)
+                }
+
+                if (streamHealthCheckActive && myGeneration == streamHealthGeneration) {
+                    streamHealthHandler.postDelayed(this, 10000)
+                }
             }
-        }, 10000)
+        }
+
+        streamHealthHandler.postDelayed(checkRunnable, 10000)
     }
 
     private fun stopStreamHealthMonitoring() {
         streamHealthCheckActive = false
+        streamHealthGeneration++
         streamHealthHandler.removeCallbacksAndMessages(null)
-    }
-
-    private fun checkStreamHealth() {
-        val timeSinceActivity = System.currentTimeMillis() - lastStreamActivity
-        if (timeSinceActivity > streamTimeout) {
-            Log.w(tag, "Stream health check failed")
-            webServer?.addLog("Stream health check failed - reloading")
-            playStream(currentGo2rtcUrl, currentStreamName, currentProtocol, forceFullReload = true)
-        }
     }
 
     private fun cleanupWebView() {
@@ -415,7 +458,8 @@ class MainActivity : AppCompatActivity() {
             if (activeNetwork != null) {
                 val caps = connectivityManager.getNetworkCapabilities(activeNetwork)
                 if (caps != null && (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
-                            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))) {
+                            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))
+                ) {
                     val interfaces = NetworkInterface.getNetworkInterfaces()
                     while (interfaces.hasMoreElements()) {
                         val intf = interfaces.nextElement()
@@ -553,7 +597,7 @@ class MainActivity : AppCompatActivity() {
 
         tourHandler.postDelayed({
             playNextTourCamera()
-        }, (tourDuration * 1000).toLong())
+        }, (tourDuration * 1000L))
     }
 
     private fun stopTour() {
@@ -580,6 +624,7 @@ class MainActivity : AppCompatActivity() {
 
         if (timeSinceLast < minSwitchIntervalMs && !forceFullReload && currentStreamName.isNotEmpty()) {
             val waitTime = minSwitchIntervalMs - timeSinceLast
+
             Log.d(tag, "Throttling rapid switch request by ${waitTime}ms to protect hardware decoder")
 
             val scheduledRunnable = Runnable {
@@ -599,6 +644,17 @@ class MainActivity : AppCompatActivity() {
         forceFullReload: Boolean
     ) {
         lastPlayTriggerTime = System.currentTimeMillis()
+
+        // CACHE OLD STATE FOR EVALUATION BEFORE OVERWRITING
+        val isFirstLoad = currentStreamName.isEmpty()
+        val sameProtocol = protocol == currentProtocol
+        val canAttemptInPlaceSwitch = !forceFullReload && !isFirstLoad && sameProtocol && !pendingPlayRequest
+
+        // STATE UPDATED IMMEDIATELY TO PREVENT RACE CONDITIONS ON ERROR INTERCEPTS
+        currentGo2rtcUrl = go2rtcUrl
+        currentStreamName = streamName
+        currentProtocol = protocol
+        webServer?.updatePlaybackState(streamName, protocol, go2rtcUrl)
 
         try {
             Log.d(tag, "=== Play Stream Request ===")
@@ -628,11 +684,6 @@ class MainActivity : AppCompatActivity() {
             errorTextView.visibility = View.GONE
             ipTextView.visibility = View.GONE
 
-            val isFirstLoad = currentStreamName.isEmpty()
-            val sameProtocol = protocol == currentProtocol
-            val canAttemptInPlaceSwitch =
-                !forceFullReload && !isFirstLoad && sameProtocol && !pendingPlayRequest
-
             stopStreamHealthMonitoring()
 
             if (canAttemptInPlaceSwitch) {
@@ -650,10 +701,6 @@ class MainActivity : AppCompatActivity() {
                 ) { result ->
                     if (result == "true") {
                         Log.d(tag, "In-place stream switch succeeded")
-                        currentGo2rtcUrl = go2rtcUrl
-                        currentStreamName = streamName
-                        currentProtocol = protocol
-                        webServer?.updatePlaybackState(streamName, protocol, go2rtcUrl)
                         lastStreamActivity = System.currentTimeMillis()
                         statusOverlay.visibility = View.GONE
                         errorTextView.visibility = View.GONE
@@ -681,6 +728,9 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             Log.e(tag, "Error playing stream", e)
             webServer?.addLog("Play error: ${e.message}")
+            statusOverlay.visibility = View.GONE
+            errorTextView.text = "Play error: ${e.message}"
+            errorTextView.visibility = View.VISIBLE
             Toast.makeText(this, "Play error: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
@@ -693,9 +743,10 @@ class MainActivity : AppCompatActivity() {
         normalizedUrl: String,
         streamUrl: String
     ) {
+        scheduledReloadRunnable?.let { reloadHandler.removeCallbacks(it) }
+
         pendingPlayRequest = true
 
-        // 1. Tell JS player to stop media streams and unbind video elements before reload
         webView.evaluateJavascript(
             "(function(){ if (window.stopStream) { window.stopStream(); } var v = document.querySelector('video'); if (v) { v.pause(); v.src = ''; v.srcObject = null; } })();",
             null
@@ -703,21 +754,18 @@ class MainActivity : AppCompatActivity() {
 
         cleanupWebView()
 
-        Handler(Looper.getMainLooper()).postDelayed({
-            currentGo2rtcUrl = go2rtcUrl
-            currentStreamName = streamName
-            currentProtocol = protocol
-            webServer?.updatePlaybackState(streamName, protocol, go2rtcUrl)
-
+        val reloadRunnable = Runnable {
+            // Note: State is now updated in executePlayStream, before this runnable
             val html = webServer?.getStreamHtml(streamUrl, streamName, protocol) ?: ""
 
             if (html.isBlank()) {
                 Log.e(tag, "Generated stream HTML was blank")
                 webServer?.addLog("Generated stream HTML was blank")
+                statusOverlay.visibility = View.GONE
                 errorTextView.text = "Failed to generate stream page"
                 errorTextView.visibility = View.VISIBLE
                 pendingPlayRequest = false
-                return@postDelayed
+                return@Runnable
             }
 
             Log.d(tag, "HTML length: ${html.length} characters")
@@ -728,18 +776,22 @@ class MainActivity : AppCompatActivity() {
                 Log.d(tag, "Stream HTML loaded into WebView (full reload)")
 
                 lastStreamActivity = System.currentTimeMillis()
-                statusOverlay.visibility = View.GONE
                 errorTextView.visibility = View.GONE
                 startStreamHealthMonitoring()
             } catch (e: Exception) {
                 Log.e(tag, "Error loading HTML into WebView", e)
                 webServer?.addLog("WebView load error: ${e.message}")
+                statusOverlay.visibility = View.GONE
                 errorTextView.text = "WebView load error: ${e.message}"
                 errorTextView.visibility = View.VISIBLE
+                startStreamHealthMonitoring()
             } finally {
                 pendingPlayRequest = false
             }
-        }, 300)
+        }
+
+        scheduledReloadRunnable = reloadRunnable
+        reloadHandler.postDelayed(reloadRunnable, 300)
     }
 
     private fun getLogoBase64(): String {
@@ -763,45 +815,18 @@ class MainActivity : AppCompatActivity() {
             <html>
             <head>
                 <meta charset="utf-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
                 <style>
-                    body {
-                        background-color: black;
-                        color: #aaa;
-                        font-family: sans-serif;
-                        display: flex;
-                        flex-direction: column;
-                        justify-content: center;
-                        align-items: center;
-                        height: 100vh;
-                        margin: 0;
-                        text-align: center;
-                    }
-                    h1 {
-                        color: #fff;
-                        font-weight: normal;
-                        margin-bottom: 5px;
-                    }
-                    .url {
-                        font-size: 1.5em;
-                        color: #4fc3f7;
-                        margin-top: 15px;
-                    }
-                    .info {
-                        font-size: 0.9em;
-                        margin-top: 30px;
-                        opacity: 0.6;
-                    }
-                    .logo {
-                        max-width: 250px;
-                        height: auto;
-                    }
+                    html, body { margin:0; padding:0; height:100%; background:#000; color:#ccc;
+                        font-family:sans-serif; display:flex; flex-direction:column;
+                        align-items:center; justify-content:center; }
+                    img { max-width:200px; margin-bottom:24px; opacity:0.85; }
+                    .url { color:#4da6ff; margin-top:8px; }
                 </style>
             </head>
             <body>
-                ${if (logoSrc.isNotEmpty()) "<img src=\"$logoSrc\" alt=\"TPN Stream Viewer\" class=\"logo\">" else ""}
-                <p>Awaiting Stream</p>
-                <p class="info">Configure via web interface:</p>
+                ${if (logoSrc.isNotEmpty()) "<img src=\"$logoSrc\" />" else ""}
+                <div>Awaiting Stream</div>
+                <div>Configure via web interface:</div>
                 <div class="url">http://$ipAddress:$currentPort</div>
             </body>
             </html>
@@ -956,6 +981,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         try {
             scheduledPlayRunnable?.let { playStreamHandler.removeCallbacks(it) }
+            scheduledReloadRunnable?.let { reloadHandler.removeCallbacks(it) }
             webServer?.stop()
             webServer = null
             tourHandler.removeCallbacksAndMessages(null)
