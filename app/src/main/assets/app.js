@@ -517,7 +517,7 @@ function toggleLogs() {
         const persistedLogs = loadPersistedLogs();
         document.getElementById('logs-content').textContent = persistedLogs + 'Loading...';
         fetchLogs();
-        if (!logsPaused) logsInterval = setInterval(fetchLogs, 500);
+        if (!logsPaused) logsInterval = setInterval(fetchLogs, 1000);
     } else {
         logsDiv.classList.remove('visible');
         logControls.style.display = 'none';
@@ -542,7 +542,7 @@ function toggleLogPause() {
         statusIndicator.classList.add('paused');
         logsDiv.classList.add('paused');
     } else {
-        logsInterval = setInterval(fetchLogs, 500);
+        logsInterval = setInterval(fetchLogs, 1000);
         statusIndicator.textContent = '● Live';
         statusIndicator.classList.remove('paused');
         logsDiv.classList.remove('paused');

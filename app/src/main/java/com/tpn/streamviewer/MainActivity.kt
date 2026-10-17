@@ -3,6 +3,7 @@ package com.tpn.streamviewer
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.SharedPreferences
 import android.graphics.Color
 import android.net.ConnectivityManager
@@ -78,6 +79,9 @@ class MainActivity : AppCompatActivity() {
     private val streamTimeout = 15000L // 15 seconds
     private var streamHealthCheckActive = false
     private var streamHealthGeneration = 0
+    private var lastVideoTime = -1.0
+    private var lastProgressAt = 0L
+    private val healthCheckIntervalMs = 5000L
     private lateinit var prefs: SharedPreferences
 
     // Error-driven recovery
@@ -97,6 +101,10 @@ class MainActivity : AppCompatActivity() {
             errorTextView = findViewById(R.id.errorTextView)
 
             webView.setBackgroundColor(Color.BLACK)
+
+            if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+                WebView.setWebContentsDebuggingEnabled(true)
+            }
 
             prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
             isFirstRun = !prefs.getBoolean("initialized", false)
@@ -156,9 +164,7 @@ class MainActivity : AppCompatActivity() {
                         webServer?.addLog("Stream error: $message")
 
                         // IGNORING EXPECTED TEARDOWN ERRORS
-                        if (message.contains("Empty src attribute") ||
-                            message.contains("MEDIA_ELEMENT_ERROR") ||
-                            pendingPlayRequest) {
+                        if (message.contains("Empty src attribute") || pendingPlayRequest) {
                             Log.d(tag, "Ignoring expected error during stream teardown")
                             return@runOnUiThread
                         }
@@ -247,6 +253,7 @@ class MainActivity : AppCompatActivity() {
                         stopStreamHealthMonitoring()
                         scheduledReloadRunnable?.let { reloadHandler.removeCallbacks(it) }
                         scheduledPlayRunnable?.let { playStreamHandler.removeCallbacks(it) }
+                        pendingPlayRequest = false
 
                         playStream(serverUrl, camera.streamName, camera.protocol)
                         Toast.makeText(this, "Loading: ${camera.name}", Toast.LENGTH_SHORT).show()
@@ -272,6 +279,8 @@ class MainActivity : AppCompatActivity() {
 
         streamHealthCheckActive = true
         lastStreamActivity = System.currentTimeMillis()
+        lastVideoTime = -1.0
+        lastProgressAt = lastStreamActivity
         val myGeneration = ++streamHealthGeneration
 
         val checkRunnable = object : Runnable {
@@ -287,18 +296,37 @@ class MainActivity : AppCompatActivity() {
                         webServer?.addLog("Stream timeout detected - attempting recovery")
 
                         playStream(currentGo2rtcUrl, currentStreamName, currentProtocol, forceFullReload = true)
+                    } else if (currentStreamName.isNotEmpty() && !pendingPlayRequest && !burnInBlankActive) {
+                        // Independent progress check: heartbeats can lie, currentTime cannot
+                        webView.evaluateJavascript(
+                            "(function(){var v=document.querySelector('video');return v?v.currentTime:-1;})()"
+                        ) { result ->
+                            if (myGeneration != streamHealthGeneration || !streamHealthCheckActive) {
+                                return@evaluateJavascript
+                            }
+                            val t = result?.toDoubleOrNull() ?: -1.0
+                            val now = System.currentTimeMillis()
+                            if (t > lastVideoTime + 0.05 || t < lastVideoTime - 1.0) {
+                                lastVideoTime = t
+                                lastProgressAt = now
+                            } else if (now - lastProgressAt > streamTimeout && !pendingPlayRequest) {
+                                Log.w(tag, "No currentTime progress for ${now - lastProgressAt}ms (t=$t)")
+                                webServer?.addLog("Watchdog: playback stuck at t=$t for ${(now - lastProgressAt) / 1000}s - reloading")
+                                playStream(currentGo2rtcUrl, currentStreamName, currentProtocol, forceFullReload = true)
+                            }
+                        }
                     }
                 } catch (e: Exception) {
                     Log.e(tag, "Error during stream health check", e)
                 }
 
                 if (streamHealthCheckActive && myGeneration == streamHealthGeneration) {
-                    streamHealthHandler.postDelayed(this, 10000)
+                    streamHealthHandler.postDelayed(this, healthCheckIntervalMs)
                 }
             }
         }
 
-        streamHealthHandler.postDelayed(checkRunnable, 10000)
+        streamHealthHandler.postDelayed(checkRunnable, healthCheckIntervalMs)
     }
 
     private fun stopStreamHealthMonitoring() {

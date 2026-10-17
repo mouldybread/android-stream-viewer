@@ -38,7 +38,7 @@ class AndroidWebServer(
 
     private val tag = "AndroidWebServer"
     private val logs = ArrayDeque<String>()
-    private val maxLogs = 500
+    private val maxLogs = 2000
 
     private val appPrefs: SharedPreferences =
         context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
@@ -110,7 +110,9 @@ class AndroidWebServer(
         val uri = session.uri
         val method = session.method
 
-        addLog("${method.name} $uri")
+        if (uri != "/api/logs" && uri != "/api/status") {
+            addLog("${method.name} $uri")
+        }
 
         return when {
             uri == "/api/cameras" && method == Method.GET -> handleGetCameras()

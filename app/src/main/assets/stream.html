@@ -61,6 +61,56 @@
             let decodeErrorCount = 0;
             const maxReconnectAttempts = 5;
 
+            // --- MSE buffer management / progress tracking ---
+            const BACK_BUFFER_S = 8;      // seconds kept behind the playhead
+            const LIVE_EDGE_MAX_LAG_S = 2.5;
+            const MAX_QUEUE = 120;        // pending chunks before we give up and restart
+            const STALL_RESTART_MS = 10000;
+            let startToken = 0;
+            let lastT = -1;
+            let lastProgress = Date.now();
+            let waitCount = 0;
+            let lastPlayingLog = 0;
+            let diagTick = 0;
+
+            function pump() {
+                if (!sourceBuffer || !mediaSource || mediaSource.readyState !== 'open' || sourceBuffer.updating) return;
+                try {
+                    const b = sourceBuffer.buffered;
+                    if (b.length) {
+                        const start = b.start(0);
+                        const trimTo = video.currentTime - BACK_BUFFER_S;
+                        if (trimTo - start > 1) {
+                            sourceBuffer.remove(start, trimTo); // updateend -> pump()
+                            return;
+                        }
+                    }
+                    if (queue.length) {
+                        sourceBuffer.appendBuffer(queue[0]);
+                        queue.shift();
+                    }
+                } catch (e) {
+                    if (e.name === 'QuotaExceededError') {
+                        log('Buffer quota exceeded, forcing trim');
+                        try {
+                            const b = sourceBuffer.buffered;
+                            const cut = Math.max(video.currentTime - 1, 0);
+                            if (b.length && cut > b.start(0)) {
+                                sourceBuffer.remove(b.start(0), cut);
+                            } else {
+                                log('Cannot trim buffer - restarting stream');
+                                startStream();
+                            }
+                        } catch (e2) {
+                            log('Trim failed: ' + e2.message + ' - restarting stream');
+                            startStream();
+                        }
+                    } else {
+                        log('Append error: ' + e.name + ' ' + e.message);
+                    }
+                }
+            }
+
             video.controls = false;
             video.defaultMuted = true;
             video.muted = true;
@@ -199,11 +249,18 @@
             }
 
             async function startStream() {
+                const myToken = ++startToken;
                 try {
                     cleanup();
                     // Small delay lets the previous decoder/surface fully release before
                     // a new codec instance is allocated - avoids Amlogic C2 start timeout races
                     await new Promise(resolve => setTimeout(resolve, 300));
+                    if (myToken !== startToken) {
+                        log('Start superseded by a newer request - aborting this one');
+                        return;
+                    }
+                    lastT = -1;
+                    lastProgress = Date.now();
 
                     log('=== Starting Stream ===');
                     log('Protocol: ' + (forceWebRTC ? 'WebRTC only' : forceMSE ? 'MSE only' : 'Auto'));
@@ -369,13 +426,7 @@
                                         sourceBuffer = mediaSource.addSourceBuffer(msg.value);
                                         sourceBuffer.mode = 'segments';
 
-                                        sourceBuffer.addEventListener('updateend', () => {
-                                            if (queue.length > 0 && !sourceBuffer.updating) {
-                                                try { sourceBuffer.appendBuffer(queue.shift()); } catch (e) {
-                                                    log('Buffer append error: ' + e.message);
-                                                }
-                                            }
-                                        });
+                                        sourceBuffer.addEventListener('updateend', pump);
 
                                         sourceBuffer.addEventListener('error', (e) => {
                                             log('SourceBuffer error: ' + e);
@@ -401,26 +452,13 @@
                                     updateStatus('Server error');
                                 }
                             } else if (event.data instanceof ArrayBuffer && sourceBuffer) {
-                                if (!sourceBuffer.updating && queue.length === 0) {
-                                    try {
-                                        sourceBuffer.appendBuffer(event.data);
-                                    } catch (e) {
-                                        if (e.name === 'QuotaExceededError') {
-                                            log('Buffer full, trimming...');
-                                            try {
-                                                const buffered = sourceBuffer.buffered;
-                                                if (buffered.length > 0) {
-                                                    sourceBuffer.remove(0, buffered.end(0) - 30);
-                                                }
-                                            } catch (removeError) {
-                                                log('Buffer trim error: ' + removeError.message);
-                                            }
-                                        }
-                                        queue.push(event.data);
-                                    }
-                                } else {
-                                    queue.push(event.data);
+                                queue.push(event.data);
+                                if (queue.length > MAX_QUEUE) {
+                                    log('Append queue overflow (' + queue.length + ') - restarting stream');
+                                    startStream();
+                                    return;
                                 }
+                                pump();
                             }
                         } catch (e) {
                             log('Message error: ' + e.message);
@@ -517,8 +555,7 @@
                     streamUrl = newUrl;
                     streamName = newName;
                     decodeErrorCount = 0;
-                    cleanup();
-                    setTimeout(() => { startStream(); }, 500);
+                    startStream();
                     return true;
                 } catch (e) {
                     log('switchStream error: ' + e.message);
@@ -528,7 +565,11 @@
 
             // === HEALTH MONITORING (registered once, top-level) ===
             video.addEventListener('playing', () => {
-                log('Video is playing');
+                const nowMs = Date.now();
+                if (nowMs - lastPlayingLog > 5000) {
+                    log('Video is playing');
+                    lastPlayingLog = nowMs;
+                }
                 updateStatus('Playing');
                 videoPlaying = true;
                 decodeErrorCount = 0;
@@ -549,11 +590,17 @@
             });
 
             video.addEventListener('waiting', () => {
-                log('Video buffering...');
+                waitCount++;
             });
 
             video.addEventListener('error', (e) => {
                 const error = video.error;
+                // Teardown noise from cleanup() (src cleared) - not a real playback error
+                if ((error && /Empty src/i.test(error.message || '')) ||
+                    (!video.getAttribute('src') && !video.srcObject)) {
+                    log('Ignoring video error caused by teardown');
+                    return;
+                }
                 let errorMsg = 'Video error';
                 if (error) errorMsg += ': ' + error.code + ' - ' + error.message;
                 log(errorMsg);
@@ -577,37 +624,62 @@
                 log('Video data loaded');
             });
 
-            video.addEventListener('canplay', () => {
-                log('Video can play');
-            });
+            video.addEventListener('canplay', () => {});
 
-            setInterval(() => {
-                if (window.AndroidInterface && videoPlaying && !video.paused && !video.ended) {
-                    try { window.AndroidInterface.onStreamPlaying(); } catch (e) {
-                        console.error('Failed to send heartbeat:', e);
-                    }
-                }
-            }, 5000);
-
-            let lastFrameTime = Date.now();
+            // Progress-based watchdog (1s tick). Heartbeats are only sent while currentTime
+            // is actually advancing, so native can trust them.
             frameCheckInterval = setInterval(() => {
-                if (video.readyState >= 2 && videoPlaying) {
+                try {
                     const now = Date.now();
-                    const timeSinceLastFrame = now - lastFrameTime;
+                    if (!videoPlaying || mode === null) {
+                        lastProgress = now;
+                        return;
+                    }
+                    const t = video.currentTime;
+                    if (Math.abs(t - lastT) > 0.05) {
+                        lastT = t;
+                        lastProgress = now;
+                    }
 
-                    if (timeSinceLastFrame > 15000) {
-                        log('No video frames for ' + (timeSinceLastFrame / 1000) + 's');
+                    // Stay close to the live edge (MSE)
+                    if (mode === 'mse' && video.buffered.length) {
+                        const end = video.buffered.end(video.buffered.length - 1);
+                        if (end - t > LIVE_EDGE_MAX_LAG_S) {
+                            video.currentTime = end - 0.5;
+                        }
+                    }
+
+                    if (now - lastProgress < 6000) {
                         if (window.AndroidInterface) {
-                            try {
-                                window.AndroidInterface.onStreamError('No frames for ' + (timeSinceLastFrame / 1000) + 's');
-                            } catch (e) {
-                                console.error('Failed to report frame timeout:', e);
+                            try { window.AndroidInterface.onStreamPlaying(); } catch (e) {
+                                console.error('Failed to send heartbeat:', e);
                             }
                         }
                     }
-                    lastFrameTime = now;
+
+                    if (now - lastProgress > STALL_RESTART_MS) {
+                        log('No playback progress for ' + ((now - lastProgress) / 1000).toFixed(1) + 's - restarting stream');
+                        lastProgress = now;
+                        startStream();
+                        return;
+                    }
+
+                    if (++diagTick % 10 === 0) {
+                        const b = video.buffered;
+                        log('[DIAG] t=' + t.toFixed(2) +
+                            ' rs=' + video.readyState +
+                            ' buf=' + (b.length ? b.start(0).toFixed(1) + '-' + b.end(b.length - 1).toFixed(1) : 'none') +
+                            ' ranges=' + b.length +
+                            ' queue=' + queue.length +
+                            ' updating=' + (sourceBuffer ? sourceBuffer.updating : 'n/a') +
+                            ' waits=' + waitCount +
+                            ' mode=' + mode);
+                        waitCount = 0;
+                    }
+                } catch (e) {
+                    console.error('Progress check error:', e);
                 }
-            }, 10000);
+            }, 1000);
 
             window.addEventListener('beforeunload', () => {
                 if (frameCheckInterval) clearInterval(frameCheckInterval);
